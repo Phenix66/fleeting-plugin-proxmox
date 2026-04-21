@@ -194,6 +194,7 @@ func (ig *InstanceGroup) getConnectInfoFromVM(ctx context.Context, instance stri
 		if err != nil {
 			ig.log.Error("failed to get network interface", "retry", retry, "err", err)
 			time.Sleep(networkCheckTimeout)
+
 			continue
 		}
 
@@ -204,6 +205,7 @@ func (ig *InstanceGroup) getConnectInfoFromVM(ctx context.Context, instance stri
 			ConnectorConfig: ig.FleetingSettings.ConnectorConfig,
 		}, nil
 	}
+
 	return provider.ConnectInfo{}, fmt.Errorf("Timed out getting connection info")
 }
 
