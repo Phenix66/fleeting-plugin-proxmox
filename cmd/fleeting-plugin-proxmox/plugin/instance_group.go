@@ -206,7 +206,7 @@ func (ig *InstanceGroup) getConnectInfoFromVM(ctx context.Context, instance stri
 		}, nil
 	}
 
-	return provider.ConnectInfo{}, fmt.Errorf("Timed out getting connection info")
+	return provider.ConnectInfo{}, fmt.Errorf("Timed out getting connection info vmid='%d'", vm.VMID)
 }
 
 // ConnectInfo implements provider.InstanceGroup.
