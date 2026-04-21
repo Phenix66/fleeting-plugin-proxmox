@@ -1,4 +1,4 @@
-module github.com/lukask32/fleeting-plugin-proxmox
+module github.com/phenix66/fleeting-plugin-proxmox
 
 go 1.22.3
 
