@@ -192,7 +192,7 @@ func (ig *InstanceGroup) getConnectInfoFromVM(ctx context.Context, instance stri
 
 		internalAddress, externalAddress, err := determineAddresses(networkInterfaces, ig.InstanceNetworkInterface, ig.InstanceNetworkProtocol)
 		if err != nil {
-			ig.log.Error("failed to get network interface", "retry", retry, "err", err)
+			ig.log.Error("failed to get network interface", "retry", retry, "vmid", vm.VMID, "err", err)
 			time.Sleep(networkCheckTimeout)
 
 			continue

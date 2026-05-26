@@ -9,5 +9,4 @@
     "go.alternateTools": {
         "golangci-lint": "${workspaceFolder}/tools/golangci-lint",
     },
-    "nuxt.isNuxtApp": false,
 }

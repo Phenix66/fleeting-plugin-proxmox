@@ -37,6 +37,11 @@ func (ig *InstanceGroup) deployInstance(ctx context.Context, template *proxmox.V
 		return VMID, fmt.Errorf("failed to find newly deployed instance vmid='%d': %w", VMID, err)
 	}
 
+	vm.Config(ctx, proxmox.VirtualMachineOption{
+		Name:  "tags",
+		Value: ig.Settings.InstanceTagsCreating,
+	})
+
 	// Start, configure etc.
 	err = func() error {
 		// Start the VM
@@ -58,16 +63,24 @@ func (ig *InstanceGroup) deployInstance(ctx context.Context, template *proxmox.V
 	}()
 
 	newInstanceName := ig.Settings.InstanceNameRunning
+	newInstanceTags := ig.Settings.InstanceTagsRunning
 
 	if err != nil {
 		ig.log.Error("instance deployment failed, marking for removal", "vmid", VMID, "err", err)
 		newInstanceName = ig.Settings.InstanceNameRemoving
+		newInstanceTags = ig.Settings.InstanceTagsRemoving
 	}
 
-	_, renameErr := vm.Config(ctx, proxmox.VirtualMachineOption{
-		Name:  "name",
-		Value: newInstanceName,
-	})
+	_, renameErr := vm.Config(ctx,
+		proxmox.VirtualMachineOption{
+			Name:  "name",
+			Value: newInstanceName,
+		},
+		proxmox.VirtualMachineOption{
+			Name:  "tags",
+			Value: newInstanceTags,
+		},
+	)
 
 	if renameErr != nil {
 		ig.log.Error("failed to rename instance", "vmid", VMID, "err", renameErr)
@@ -165,10 +178,16 @@ func (ig *InstanceGroup) markInstancesForRemoval(ctx context.Context, instances 
 				return fmt.Errorf("failed to mark instance for removal: %w", err)
 			}
 
-			task, err := vm.Config(ctx, proxmox.VirtualMachineOption{
-				Name:  "name",
-				Value: ig.Settings.InstanceNameRemoving,
-			})
+			task, err := vm.Config(ctx,
+				proxmox.VirtualMachineOption{
+					Name:  "name",
+					Value: ig.Settings.InstanceNameRemoving,
+				},
+				proxmox.VirtualMachineOption{
+					Name:  "tags",
+					Value: ig.Settings.InstanceTagsRemoving,
+				},
+			)
 
 			if err == nil {
 				err = task.Wait(ctx, proxmoxTaskWaitInterval, proxmoxTaskWaitTimeout)

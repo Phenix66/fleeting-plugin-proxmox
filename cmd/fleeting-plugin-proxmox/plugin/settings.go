@@ -71,6 +71,15 @@ type Settings struct {
 
 	// Name to set for instances during removal.
 	InstanceNameRemoving string `json:"instance_name_removing"`
+
+	// Tags to set for instances during creation, semicolon delimited.
+	InstanceTagsCreating string `json:"instance_tags_creating"`
+
+	// Tags to set for running instances, semicolon delimited.
+	InstanceTagsRunning string `json:"instance_tags_running"`
+
+	// Tags to set for instances during removal, semicolon delimited.
+	InstanceTagsRemoving string `json:"instance_tags_removing"`
 }
 
 func (s *Settings) FillWithDefaults() {
