@@ -122,7 +122,7 @@ func (ig *InstanceGroup) getTemplateCloneOptions(template *proxmox.VirtualMachin
 		return nil, ErrCloneVMWithoutConfiguredStorage
 	}
 
-	if (template.Template && ig.Settings.Storage == "") || ig.Settings.UseLinkedClones {
+	if ig.Settings.UseLinkedClones || (template.Template == true && ig.Settings.Storage == "") {
 		cloneOptions.Full = 0
 	}
 
