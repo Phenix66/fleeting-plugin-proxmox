@@ -27,6 +27,7 @@ See [Releases](https://github.com/Phenix66/fleeting-plugin-proxmox/releases) for
 | `instance_tags_creating`     | string                    | None (`""`)                        | Tags to set for instances during creation. Separate multiple tags with semicolons (`;`). This will remove any manually applied tags. |
 | `instance_tags_running`      | string                    | None (`""`)                        | Tags to set for running instances. Separate multiple tags with semicolons (`;`). This will remove any manually applied tags.         |
 | `instance_tags_removing`     | string                    | None (`""`)                        | Tags to set for instances during removal. Separate multiple tags with semicolons (`;`). This will remove any manually applied tags.  |
+| `use_linked_clones`          | bool                      | `false`                            | If `true` the cloned VMs will be created as linked clones instead of "full".                                                         |
 
 ### Credentials file
 
