@@ -10,17 +10,17 @@ var (
 	ErrSettingInvalidParameter = errors.New("setting has invalid parameter")
 )
 
-// Available network protocols to look for when discovering instance's IP address.
+// NetworkProtocol: Available network protocols to look for when discovering instance's IP address.
 type NetworkProtocol = string
 
 const (
-	// Tries to find one internal and one external IPv4 address.
+	// NetworkProtocolIPv4: Tries to find one internal and one external IPv4 address.
 	NetworkProtocolIPv4 NetworkProtocol = "ipv4"
 
-	// Tries to find one internal (ULA) and one global (GUA) IPv6 address.
+	// NetworkProtocolIPv6: Tries to find one internal (ULA) and one global (GUA) IPv6 address.
 	NetworkProtocolIPv6 NetworkProtocol = "ipv6"
 
-	// Will prioritize IPv6 but return IPv4 if there is no IPv6.
+	// NetworkProtocolAny: Will prioritize IPv6 but return IPv4 if there is no IPv6.
 	NetworkProtocolAny NetworkProtocol = "any"
 )
 
@@ -34,7 +34,7 @@ const (
 	DefaultInstanceNameRemoving = "fleeting-removing"
 )
 
-// Plguin settings.
+// Settings: Plguin settings.
 type Settings struct {
 	// Proxmox VE URL.
 	URL string `json:"url"`
