@@ -80,9 +80,6 @@ type Settings struct {
 
 	// Tags to set for instances during removal, semicolon delimited.
 	InstanceTagsRemoving string `json:"instance_tags_removing"`
-
-	// Whether or not to use linked clones
-	UseLinkedClones bool `json:"use_linked_clones"`
 }
 
 func (s *Settings) FillWithDefaults() {
