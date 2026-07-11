@@ -12,7 +12,6 @@ import (
 )
 
 const (
-	proxmoxTaskWaitInterval  = 10 * time.Second
 	proxmoxTaskWaitTimeout   = 5 * time.Minute
 	proxmoxAgentStartTimeout = 2 * time.Minute
 
@@ -27,7 +26,7 @@ func (ig *InstanceGroup) deployInstance(ctx context.Context, template *proxmox.V
 	if err == nil {
 		ig.log.Info("Deploying new instance", "vmid", VMID)
 
-		err = task.Wait(ctx, proxmoxTaskWaitInterval, proxmoxTaskWaitTimeout)
+		err = task.Wait(ctx, time.Duration(*ig.Settings.ProxmoxTaskWaitInterval)*time.Second, proxmoxTaskWaitTimeout)
 	}
 
 	if err != nil {
@@ -52,7 +51,7 @@ func (ig *InstanceGroup) deployInstance(ctx context.Context, template *proxmox.V
 		// Start the VM
 		task, err := vm.Start(ctx)
 		if err == nil {
-			err = task.Wait(ctx, proxmoxTaskWaitInterval, proxmoxTaskWaitTimeout)
+			err = task.Wait(ctx, time.Duration(*ig.Settings.ProxmoxTaskWaitInterval)*time.Second, proxmoxTaskWaitTimeout)
 		}
 
 		if err != nil {
@@ -191,7 +190,7 @@ func (ig *InstanceGroup) markInstancesForRemoval(ctx context.Context, instances 
 				},
 			)
 			if err == nil {
-				err = task.Wait(ctx, proxmoxTaskWaitInterval, proxmoxTaskWaitTimeout)
+				err = task.Wait(ctx, time.Duration(*ig.Settings.ProxmoxTaskWaitInterval)*time.Second, proxmoxTaskWaitTimeout)
 			}
 
 			if err != nil {
