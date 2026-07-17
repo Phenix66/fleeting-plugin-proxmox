@@ -3,6 +3,8 @@ package plugin
 import (
 	"errors"
 	"fmt"
+	"regexp"
+	"strconv"
 )
 
 var (
@@ -32,6 +34,8 @@ const (
 	DefaultInstanceNameCreating = "fleeting-creating"
 	DefaultInstanceNameRunning  = "fleeting-running"
 	DefaultInstanceNameRemoving = "fleeting-removing"
+
+	DefaultProxmoxTaskWaitInterval int = 10
 )
 
 // Settings: Plguin settings.
@@ -86,6 +90,9 @@ type Settings struct {
 
 	// Increase disk to this size after cloning.
 	InstanceAutoresizeSize *string `json:"instance_autoresize_size"`
+
+	// How often should task status be queried
+	ProxmoxTaskWaitInterval *int `json:"proxmox_task_wait_interval"`
 }
 
 func (s *Settings) FillWithDefaults() {
@@ -111,6 +118,11 @@ func (s *Settings) FillWithDefaults() {
 
 	if s.InstanceNetworkProtocol == "" {
 		s.InstanceNetworkProtocol = DefaultInstanceNetworkProtocol
+	}
+
+	if s.ProxmoxTaskWaitInterval == nil {
+		s.ProxmoxTaskWaitInterval = new(int)
+		*s.ProxmoxTaskWaitInterval = DefaultProxmoxTaskWaitInterval
 	}
 }
 
