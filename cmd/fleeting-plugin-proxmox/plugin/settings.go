@@ -250,7 +250,7 @@ func (s *Settings) validateInstanceAutoresizeDisk() error {
 // getDiskMaxIndex returns the maximum valid index for a given disk type.
 func getDiskMaxIndex(diskType string) int {
 	switch diskType {
-	case "ide":
+	case "ide": //nolint:goconst
 		return maxIDEIndex
 	case "scsi":
 		return maxSCSIIndex
