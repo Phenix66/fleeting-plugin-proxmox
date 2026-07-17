@@ -196,8 +196,8 @@ func TestSettings_validateInstanceAutoresizeDisk(t *testing.T) {
 			expectedError: nil,
 		},
 		{
-			name:          "Invalid ide5 - index exceeds max",
-			disk:          "ide5",
+			name:          "Invalid ide4 - index exceeds max",
+			disk:          "ide4",
 			expectedError: ErrSettingInvalidParameter,
 		},
 		{
@@ -208,6 +208,11 @@ func TestSettings_validateInstanceAutoresizeDisk(t *testing.T) {
 		{
 			name:          "Invalid sata6 - index exceeds max",
 			disk:          "sata6",
+			expectedError: ErrSettingInvalidParameter,
+		},
+		{
+			name:          "Invalid virtio16 - index exceeds max",
+			disk:          "virtio16",
 			expectedError: ErrSettingInvalidParameter,
 		},
 		{
