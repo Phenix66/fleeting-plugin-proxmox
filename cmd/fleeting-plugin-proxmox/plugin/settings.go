@@ -33,7 +33,7 @@ const (
 	DefaultInstanceNameRunning  = "fleeting-running"
 	DefaultInstanceNameRemoving = "fleeting-removing"
 
-	DefaultProxmoxTaskWaitInterval = 10
+	DefaultProxmoxTaskWaitInterval int = 10
 )
 
 // Settings: Plguin settings.
@@ -113,6 +113,7 @@ func (s *Settings) FillWithDefaults() {
 	}
 
 	if s.ProxmoxTaskWaitInterval == nil {
+		s.ProxmoxTaskWaitInterval = new(int)
 		*s.ProxmoxTaskWaitInterval = DefaultProxmoxTaskWaitInterval
 	}
 }
