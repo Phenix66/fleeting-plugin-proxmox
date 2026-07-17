@@ -48,8 +48,8 @@ func (ig *InstanceGroup) deployInstance(ctx context.Context, template *proxmox.V
 
 	// Start, configure etc.
 	err = func() error {
-		if ig.Settings.InstanceAutoresizeSize != nil {
-			task, err := vm.ResizeDisk(ctx, *ig.Settings.InstanceAutoresizeDisk, *ig.Settings.InstanceAutoresizeSize)
+		if ig.InstanceAutoresizeSize != "" {
+			task, err := vm.ResizeDisk(ctx, ig.InstanceAutoresizeDisk, ig.InstanceAutoresizeSize)
 			if err == nil {
 				err = task.Wait(ctx, time.Duration(*ig.ProxmoxTaskWaitInterval)*time.Second, proxmoxTaskWaitTimeout)
 			}

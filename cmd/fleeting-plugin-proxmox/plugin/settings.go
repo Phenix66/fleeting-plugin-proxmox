@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"regexp"
+	"slices"
 	"strconv"
 )
 
@@ -36,6 +37,13 @@ const (
 	DefaultInstanceNameRemoving = "fleeting-removing"
 
 	DefaultProxmoxTaskWaitInterval int = 10
+)
+
+// Disk index limits for each disk type.
+const (
+	maxIDEIndex  = 4
+	maxSCSIIndex = 30
+	maxSATAIndex = 5
 )
 
 // Settings: Plguin settings.
@@ -86,10 +94,10 @@ type Settings struct {
 	InstanceTagsRemoving string `json:"instance_tags_removing"`
 
 	// Disk to increase after cloning.
-	InstanceAutoresizeDisk *string `json:"instance_autoresize_disk"`
+	InstanceAutoresizeDisk string `json:"instance_autoresize_disk"`
 
 	// Increase disk to this size after cloning.
-	InstanceAutoresizeSize *string `json:"instance_autoresize_size"`
+	InstanceAutoresizeSize string `json:"instance_autoresize_size"`
 
 	// How often should task status be queried
 	ProxmoxTaskWaitInterval *int `json:"proxmox_task_wait_interval"`
@@ -127,73 +135,158 @@ func (s *Settings) FillWithDefaults() {
 }
 
 func (s *Settings) CheckRequiredFields() error {
+	// Collect all validators
+	validators := []struct {
+		name     string
+		validate func() error
+	}{
+		{"url", s.validateURL},
+		{"credentials_file_path", s.validateCredentialsFilePath},
+		{"pool", s.validatePool},
+		{"template_id", s.validateTemplateID},
+		{"max_instances", s.validateMaxInstances},
+		{"instance_network_protocol", s.validateInstanceNetworkProtocol},
+		{"instance_autoresize_disk", s.validateInstanceAutoresizeDisk},
+		{"instance_autoresize_size", s.validateInstanceAutoresizeSize},
+		{"instance_autoresize_consistency", s.validateInstanceAutoresizeConsistency},
+	}
+
+	for _, v := range validators {
+		err := v.validate()
+		if err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
+// validateURL checks that the URL setting is not empty.
+func (s *Settings) validateURL() error {
 	if s.URL == "" {
 		return fmt.Errorf("%w: url", ErrRequiredSettingMissing)
 	}
 
+	return nil
+}
+
+// validateCredentialsFilePath checks that the credentials file path is not empty.
+func (s *Settings) validateCredentialsFilePath() error {
 	if s.CredentialsFilePath == "" {
 		return fmt.Errorf("%w: credentials_file_path", ErrRequiredSettingMissing)
 	}
 
+	return nil
+}
+
+// validatePool checks that the pool setting is not empty.
+func (s *Settings) validatePool() error {
 	if s.Pool == "" {
 		return fmt.Errorf("%w: pool", ErrRequiredSettingMissing)
 	}
 
+	return nil
+}
+
+// validateTemplateID checks that the template ID is set.
+func (s *Settings) validateTemplateID() error {
 	if s.TemplateID == nil {
 		return fmt.Errorf("%w: template_id", ErrRequiredSettingMissing)
 	}
 
+	return nil
+}
+
+// validateMaxInstances checks that the max instances is set.
+func (s *Settings) validateMaxInstances() error {
 	if s.MaxInstances == nil {
 		return fmt.Errorf("%w: max_instances", ErrRequiredSettingMissing)
 	}
 
-	if s.InstanceNetworkProtocol != "" && s.InstanceNetworkProtocol != NetworkProtocolIPv4 && s.InstanceNetworkProtocol != NetworkProtocolIPv6 && s.InstanceNetworkProtocol != NetworkProtocolAny {
-		return fmt.Errorf("%w: instance_network_protocol: must be ipv4, ipv6 or any", ErrSettingInvalidParameter)
+	return nil
+}
+
+// validateInstanceNetworkProtocol checks that the network protocol is valid.
+func (s *Settings) validateInstanceNetworkProtocol() error {
+	if s.InstanceNetworkProtocol == "" {
+		return nil
 	}
 
-	if s.InstanceAutoresizeDisk != nil && s.InstanceAutoresizeSize == nil {
+	validProtocols := []NetworkProtocol{NetworkProtocolIPv4, NetworkProtocolIPv6, NetworkProtocolAny}
+	if slices.Contains(validProtocols, s.InstanceNetworkProtocol) {
+		return nil
+	}
+
+	return fmt.Errorf("%w: instance_network_protocol: must be ipv4, ipv6 or any", ErrSettingInvalidParameter)
+}
+
+// validateInstanceAutoresizeDisk checks that the autoresize disk setting is valid.
+func (s *Settings) validateInstanceAutoresizeDisk() error {
+	if s.InstanceAutoresizeDisk == "" {
+		return nil
+	}
+
+	diskRE := regexp.MustCompile(`^(ide|scsi|sata)(\d+)$`)
+
+	matches := diskRE.FindStringSubmatch(s.InstanceAutoresizeDisk)
+	if matches == nil {
+		return fmt.Errorf("%w: instance_autoresize_disk: disk is not valid", ErrSettingInvalidParameter)
+	}
+
+	maxIndex := getDiskMaxIndex(matches[1])
+
+	i, convErr := strconv.Atoi(matches[2])
+	if convErr != nil {
+		return fmt.Errorf("invalid integer for i=%q: %w", matches[2], convErr)
+	}
+
+	if i > maxIndex {
+		return fmt.Errorf("%w: instance_autoresize_disk: disk type is valid, but index %s is not possible", ErrSettingInvalidParameter, matches[2])
+	}
+
+	return nil
+}
+
+// getDiskMaxIndex returns the maximum valid index for a given disk type.
+func getDiskMaxIndex(diskType string) int {
+	switch diskType {
+	case "ide":
+		return maxIDEIndex
+	case "scsi":
+		return maxSCSIIndex
+	case "sata":
+		return maxSATAIndex
+	default:
+		return 0
+	}
+}
+
+// validateInstanceAutoresizeSize checks that the autoresize size setting is valid.
+func (s *Settings) validateInstanceAutoresizeSize() error {
+	if s.InstanceAutoresizeSize == "" {
+		return nil
+	}
+
+	matched, err := regexp.MatchString(`^\+?\d+(\.\d+)?[KMGT]?$`, s.InstanceAutoresizeSize)
+	if err != nil {
+		return fmt.Errorf("unable to compile regex: %w", err)
+	}
+
+	if !matched {
+		return fmt.Errorf("%w: instance_autoresize_size: must be a valid absolute size, or a size increment (e.g.: +10G or 512M)", ErrSettingInvalidParameter)
+	}
+
+	return nil
+}
+
+// validateInstanceAutoresizeConsistency checks that disk and size settings are consistent.
+func (s *Settings) validateInstanceAutoresizeConsistency() error {
+	if s.InstanceAutoresizeDisk != "" && s.InstanceAutoresizeSize == "" {
 		return fmt.Errorf("%w: instance_autoresize_size must have a value when instance_autoresize_disk is set", ErrSettingInvalidParameter)
 	}
 
-	if s.InstanceAutoresizeDisk == nil && s.InstanceAutoresizeSize != nil {
+	if s.InstanceAutoresizeDisk == "" && s.InstanceAutoresizeSize != "" {
 		return fmt.Errorf("%w: instance_autoresize_disk must have a value when instance_autoresize_size is set", ErrSettingInvalidParameter)
-	}
-
-	if s.InstanceAutoresizeDisk != nil {
-		diskRE := regexp.MustCompile(`^(ide|scsi|sata)(\d+)$`)
-		matches := diskRE.FindStringSubmatch(*s.InstanceAutoresizeDisk)
-		if matches == nil {
-			return fmt.Errorf("%w: instance_autoresize_disk: disk is not valid", ErrSettingInvalidParameter)
-		}
-		maxI := 0
-		switch matches[1] {
-		case "ide":
-			maxI = 4
-		case "scsi":
-			maxI = 30
-		case "sata":
-			maxI = 5
-		}
-
-		i, convErr := strconv.Atoi(matches[2])
-		if convErr != nil {
-			return fmt.Errorf("invalid integer for i=%q: %w", matches[2], convErr)
-		}
-
-		if i > maxI {
-			return fmt.Errorf("%w: instance_autoresize_disk: disk type is valid, but index %s is not possible", ErrSettingInvalidParameter, matches[2])
-		}
-
-	}
-
-	if s.InstanceAutoresizeSize != nil {
-		matched, err := regexp.MatchString(`^\+?\d+(\.\d+)?[KMGT]?$`, *s.InstanceAutoresizeSize)
-		if err != nil {
-			return fmt.Errorf("Unable to compile regex: %w", err)
-		}
-		if !matched {
-			return fmt.Errorf("%w: instance_autoresize_size: must be a valid abolute size, or a size increment (e.g.: +10G or 512M)", ErrSettingInvalidParameter)
-		}
 	}
 
 	return nil
