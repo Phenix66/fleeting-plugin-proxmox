@@ -41,9 +41,10 @@ const (
 
 // Disk index limits for each disk type.
 const (
-	maxIDEIndex  = 4
-	maxSCSIIndex = 30
-	maxSATAIndex = 5
+	maxIDEIndex    = 3
+	maxSCSIIndex   = 30
+	maxSATAIndex   = 5
+	maxVIRTIOIndex = 15
 )
 
 // Settings: Plguin settings.
@@ -226,7 +227,7 @@ func (s *Settings) validateInstanceAutoresizeDisk() error {
 		return nil
 	}
 
-	diskRE := regexp.MustCompile(`^(ide|scsi|sata)(\d+)$`)
+	diskRE := regexp.MustCompile(`^(ide|scsi|sata|virtio)(\d+)$`)
 
 	matches := diskRE.FindStringSubmatch(s.InstanceAutoresizeDisk)
 	if matches == nil {
@@ -256,6 +257,8 @@ func getDiskMaxIndex(diskType string) int {
 		return maxSCSIIndex
 	case "sata":
 		return maxSATAIndex
+	case "virtio":
+		return maxVIRTIOIndex
 	default:
 		return 0
 	}
