@@ -115,27 +115,36 @@ func startFakeWorkers(ig *InstanceGroup) {
 	})
 }
 
-// Decrease counts instances that were already being removed as successes, but they are
-// bystanders: nothing was attempted for them. A batch in which every rename Decrease actually
-// attempted failed is still a failed batch, and a bystander must not report it as a success.
+// Decrease counts instances that were already being removed as successes, and reports another
+// manager's VM as removed without touching it, but both are bystanders: nothing was attempted
+// for them. A batch in which every rename Decrease actually attempted failed is still a failed
+// batch, and a bystander must not report it as a success.
 func TestDecreaseReportsOnlyAttemptedSuccesses(t *testing.T) {
-	ig := newRemovalTestGroup(t, removalTestServer{members: []removalTestMember{
-		{vmid: 100, name: "fleeting-running"},
-		{vmid: 101, name: "fleeting-removing"},
-	}})
-	ig.InstanceNameRunning = "fleeting-running"
+	for _, bystander := range []string{"fleeting-removing", "other-running"} {
+		t.Run(bystander, func(t *testing.T) {
+			counts := &removalRequestCounts{}
+			ig := newRemovalTestGroup(t, removalTestServer{
+				members: []removalTestMember{
+					{vmid: 100, name: "fleeting-running"},
+					{vmid: 101, name: bystander},
+				},
+				requests: counts,
+			})
 
-	// 100 is the only one attempted -- its rename is accepted and its task then fails -- while
-	// 101 is counted without a request being made for it.
-	succeeded, err := ig.Decrease(context.Background(), []string{"100", "101"})
-	require.Equal(t, []string{"101"}, succeeded)
-	require.ErrorIs(t, err, ErrTaskFailed)
+			// 100 is the only one attempted -- its rename is accepted and its task then fails --
+			// while 101 is counted without a request being made for it.
+			succeeded, err := ig.Decrease(context.Background(), []string{"100", "101"})
+			require.Equal(t, []string{"101"}, succeeded)
+			require.ErrorIs(t, err, ErrTaskFailed)
+			require.False(t, counts.requested(101, http.MethodPost, ""), "bystander got a request: %v", counts.requestsFor(101))
 
-	// Control: the same failing rename with no bystander to count. The error was always
-	// reported here, so the bystander is the only difference between the two calls.
-	succeeded, err = ig.Decrease(context.Background(), []string{"100"})
-	require.Empty(t, succeeded)
-	require.ErrorIs(t, err, ErrTaskFailed)
+			// Control: the same failing rename with no bystander to count. The error was always
+			// reported here, so the bystander is the only difference between the two calls.
+			succeeded, err = ig.Decrease(context.Background(), []string{"100"})
+			require.Empty(t, succeeded)
+			require.ErrorIs(t, err, ErrTaskFailed)
+		})
+	}
 }
 
 const (
@@ -301,6 +310,232 @@ func increaseTestVMID(t *testing.T, r *http.Request) int {
 	}
 
 	return vmid
+}
+
+// Decrease must not act on a VM whose listed name is not one of the three owned names. A
+// foreign name means the VMID belongs to another manager or has been reused since fleeting
+// last saw it; in both cases we must not rename it. The VM is reported as succeeded so the
+// provisioner stops asking; Update will no longer list it and it will be pruned on the next
+// cycle. It must not count toward batchError.
+func TestDecreaseOwnership(t *testing.T) {
+	type row struct {
+		name      string
+		members   []removalTestMember
+		wantSucc  []string
+		wantPOSTs int64
+		wantWarn  bool
+		wantErr   error
+	}
+
+	const foreignRunning = "other-running"
+
+	rows := []row{
+		{
+			// Also the VMID-reuse case: the provisioner still holds 100 as fleeting-running,
+			// but the pool now lists it under a foreign name.
+			name:     "foreign other-running",
+			members:  []removalTestMember{{vmid: 100, name: foreignRunning}},
+			wantSucc: []string{"100"},
+			wantWarn: true,
+		},
+		{
+			name:     "unrelated name backup-2026",
+			members:  []removalTestMember{{vmid: 100, name: "backup-2026"}},
+			wantSucc: []string{"100"},
+			wantWarn: true,
+		},
+		{
+			name:    "own fleeting-creating",
+			members: []removalTestMember{{vmid: 100, name: "fleeting-creating"}},
+		},
+		{
+			name:     "own fleeting-removing",
+			members:  []removalTestMember{{vmid: 100, name: "fleeting-removing"}},
+			wantSucc: []string{"100"},
+		},
+		{
+			name:      "own fleeting-running task fails",
+			members:   []removalTestMember{{vmid: 100, name: "fleeting-running"}},
+			wantPOSTs: 1,
+			wantErr:   ErrTaskFailed,
+		},
+		{
+			// Pool lists under our name but the VM was renamed before we fetched it (lag
+			// window). The rename must be refused and the instance is not in succeeded.
+			name:    "lag: listed fleeting-running fetched other-running",
+			members: []removalTestMember{{vmid: 100, name: "fleeting-running", fetchedName: foreignRunning}},
+			wantErr: ErrNotOwned,
+		},
+		{
+			// An earlier attempt's rename landed but the listing still trails it: the VM is
+			// already marked, so it is reported without a second rename.
+			name:     "lag: listed fleeting-running fetched fleeting-removing",
+			members:  []removalTestMember{{vmid: 100, name: "fleeting-running", fetchedName: "fleeting-removing"}},
+			wantSucc: []string{"100"},
+		},
+		{
+			// No name in the listing (Proxmox has no fresh status for the VM): the name on the
+			// VM decides, and our own running VM is still renamed.
+			name:      "unnamed listing, fetched fleeting-running",
+			members:   []removalTestMember{{vmid: 100, name: "", fetchedName: "fleeting-running"}},
+			wantPOSTs: 1,
+			wantErr:   ErrTaskFailed,
+		},
+		{
+			name:     "unnamed listing, fetched other-running",
+			members:  []removalTestMember{{vmid: 100, name: "", fetchedName: foreignRunning}},
+			wantSucc: []string{"100"},
+			wantWarn: true,
+		},
+	}
+
+	for _, tc := range rows {
+		t.Run(tc.name, func(t *testing.T) {
+			log, logBuf := newLogBuffer(t)
+			counts := &removalRequestCounts{}
+			ig := newRemovalTestGroup(t, removalTestServer{
+				log:      log,
+				members:  tc.members,
+				requests: counts,
+			})
+
+			succeeded, err := ig.Decrease(context.Background(), []string{"100"})
+
+			if tc.wantErr != nil {
+				require.ErrorIs(t, err, tc.wantErr)
+			} else {
+				require.NoError(t, err)
+			}
+
+			require.ElementsMatch(t, tc.wantSucc, succeeded)
+
+			require.Equal(t, tc.wantPOSTs, counts.configPOSTs.Load(), "config POST count")
+
+			const warnPattern = `\[WARN\].*refusing to remove instance not owned by this group`
+			if tc.wantWarn {
+				require.Regexp(t, warnPattern, logBuf.String())
+			} else {
+				require.NotRegexp(t, warnPattern, logBuf.String())
+			}
+		})
+	}
+}
+
+// TestRPCsRefuseForeignInstance verifies that ConnectInfo, Heartbeat, Resume, and Suspend all
+// refuse to act on a VM whose listed or fetched name is not owned by this group, with a message
+// that names the vmid and the foreign name. A VM listed under a foreign name gets no per-vmid
+// API request at all; one listed under our name but fetched under a foreign one gets only the
+// fetch that revealed it.
+func TestRPCsRefuseForeignInstance(t *testing.T) {
+	members := []removalTestMember{
+		{vmid: 100, name: "fleeting-running"},
+		{vmid: 101, name: "other-running"},
+		{vmid: 102, name: "fleeting-running", fetchedName: "other-running"},
+		{vmid: 103, name: "", fetchedName: "fleeting-running"},
+	}
+
+	t.Run("ConnectInfo refusal", func(t *testing.T) {
+		counts := &removalRequestCounts{}
+		ig := newRemovalTestGroup(t, removalTestServer{members: members, requests: counts})
+
+		_, err := ig.ConnectInfo(context.Background(), "101")
+		require.ErrorIs(t, err, ErrNotOwned)
+		require.Contains(t, err.Error(), "failed to retrieve instance vmid='101'")
+		require.Contains(t, err.Error(), "other-running")
+		require.Empty(t, counts.requestsFor(101))
+	})
+
+	t.Run("Heartbeat refusal", func(t *testing.T) {
+		counts := &removalRequestCounts{}
+		ig := newRemovalTestGroup(t, removalTestServer{members: members, requests: counts})
+
+		err := ig.Heartbeat(context.Background(), "101")
+		require.ErrorIs(t, err, ErrNotOwned)
+		require.Contains(t, err.Error(), "failed to retrieve instance vmid='101'")
+		require.Contains(t, err.Error(), "other-running")
+		require.Empty(t, counts.requestsFor(101))
+	})
+
+	t.Run("Resume refusal", func(t *testing.T) {
+		counts := &removalRequestCounts{}
+		ig := newRemovalTestGroup(t, removalTestServer{members: members, requests: counts})
+
+		succeeded, err := ig.Resume(context.Background(), []string{"100", "101"})
+		require.Equal(t, []string{"100"}, succeeded)
+		require.ErrorIs(t, err, ErrResumeFailed)
+		require.Contains(t, err.Error(), "not owned")
+		require.Empty(t, counts.requestsFor(101))
+		require.True(t, counts.requested(100, "", "status/resume"), "vm 100 should have received a resume request")
+	})
+
+	t.Run("Suspend refusal", func(t *testing.T) {
+		counts := &removalRequestCounts{}
+		ig := newRemovalTestGroup(t, removalTestServer{members: members, requests: counts})
+
+		succeeded, err := ig.Suspend(context.Background(), []string{"100", "101"})
+		require.Equal(t, []string{"100"}, succeeded)
+		require.ErrorIs(t, err, ErrSuspendFailed)
+		require.Contains(t, err.Error(), "not owned")
+		require.Empty(t, counts.requestsFor(101))
+		require.True(t, counts.requested(100, "", "status/suspend"), "vm 100 should have received a suspend request")
+	})
+
+	t.Run("Heartbeat control", func(t *testing.T) {
+		counts := &removalRequestCounts{}
+		ig := newRemovalTestGroup(t, removalTestServer{members: members, requests: counts})
+
+		err := ig.Heartbeat(context.Background(), "100")
+		require.NoError(t, err)
+		require.True(t, counts.requested(100, "", "agent/get-osinfo"), "vm 100 should have received an agent/get-osinfo request")
+	})
+
+	// An unnamed listing is no evidence of a foreign VM: the fetched name decides.
+	t.Run("Heartbeat control: unnamed listing", func(t *testing.T) {
+		counts := &removalRequestCounts{}
+		ig := newRemovalTestGroup(t, removalTestServer{members: members, requests: counts})
+
+		err := ig.Heartbeat(context.Background(), "103")
+		require.NoError(t, err)
+		require.True(t, counts.requested(103, "", "agent/get-osinfo"), "vm 103 should have received an agent/get-osinfo request")
+	})
+
+	// Listed under our name, fetched under a foreign one: every RPC refuses without acting.
+	fetchedForeign := []struct {
+		name string
+		call func(ig *InstanceGroup) error
+	}{
+		{"ConnectInfo", func(ig *InstanceGroup) error {
+			_, err := ig.ConnectInfo(context.Background(), "102")
+
+			return err
+		}},
+		{"Heartbeat", func(ig *InstanceGroup) error { return ig.Heartbeat(context.Background(), "102") }},
+		{"Resume", func(ig *InstanceGroup) error {
+			_, err := ig.Resume(context.Background(), []string{"102"})
+
+			return err
+		}},
+		{"Suspend", func(ig *InstanceGroup) error {
+			_, err := ig.Suspend(context.Background(), []string{"102"})
+
+			return err
+		}},
+	}
+
+	for _, tc := range fetchedForeign {
+		t.Run(tc.name+" refusal: fetched name", func(t *testing.T) {
+			counts := &removalRequestCounts{}
+			ig := newRemovalTestGroup(t, removalTestServer{members: members, requests: counts})
+
+			err := tc.call(ig)
+			require.Error(t, err)
+			require.Contains(t, err.Error(), "vmid='102' is named \"other-running\": not owned")
+
+			for _, route := range []string{"agent/", "status/resume", "status/suspend"} {
+				require.False(t, counts.requested(102, "", route), "acted on vm 102 via %q: %v", route, counts.requestsFor(102))
+			}
+		})
+	}
 }
 
 // Increase must not report a partially successful batch as an error. fleeting's gRPC shim

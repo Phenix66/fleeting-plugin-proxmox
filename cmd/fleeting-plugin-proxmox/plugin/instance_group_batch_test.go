@@ -70,4 +70,19 @@ func TestRunParallel(t *testing.T) {
 	require.Equal(t, []error{nil, errFirst, nil}, errs)
 
 	require.Empty(t, runParallel(0, func(int) error { return errFirst }))
+
+	// A panic in one call becomes that slot's error instead of taking the process down, and
+	// the other slots still complete.
+	panicked := runParallel(3, func(index int) error {
+		if index == 2 {
+			panic("boom")
+		}
+
+		return nil
+	})
+
+	require.ErrorIs(t, panicked[2], ErrInstanceOperationPanic)
+	require.ErrorContains(t, panicked[2], "boom")
+	require.NoError(t, panicked[0])
+	require.NoError(t, panicked[1])
 }

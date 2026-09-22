@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"runtime/debug"
 	"slices"
 	"strconv"
 	"strings"
@@ -21,6 +22,10 @@ var (
 	ErrInstanceConnectionTimeout = errors.New("timed out getting connection info")
 	ErrResumeFailed              = errors.New("one or more instances did not resume successfully")
 	ErrSuspendFailed             = errors.New("one or more instances did not suspend successfully")
+
+	// ErrInstanceOperationPanic reports a panic in one parallel instance operation, recovered
+	// so it fails that attempt instead of taking the plugin process down.
+	ErrInstanceOperationPanic = errors.New("instance operation panicked")
 )
 
 const (
@@ -130,7 +135,9 @@ func (ig *InstanceGroup) Shutdown(_ context.Context) error {
 }
 
 // runParallel calls run once for every index in [0, count), returning each call's error in
-// its own slot so a failure stays matched to the item that caused it without a lock.
+// its own slot so a failure stays matched to the item that caused it without a lock. A panic
+// in one call becomes that slot's error, so a single bad item fails its own attempt instead
+// of taking the plugin process down.
 func runParallel(count int, run func(index int) error) []error {
 	if count <= 0 {
 		return nil
@@ -142,13 +149,25 @@ func runParallel(count int, run func(index int) error) []error {
 
 	for index := range count {
 		waitGroup.Go(func() {
-			errs[index] = run(index)
+			errs[index] = runRecovering(index, run)
 		})
 	}
 
 	waitGroup.Wait()
 
 	return errs
+}
+
+// runRecovering runs run(index) and turns a panic into the slot's error, carrying the panic
+// value and stack so the failure stays diagnosable wherever the error is logged.
+func runRecovering(index int, run func(index int) error) (err error) {
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			err = fmt.Errorf("%w: %v\n%s", ErrInstanceOperationPanic, recovered, debug.Stack())
+		}
+	}()
+
+	return run(index)
 }
 
 // Increase implements provider.InstanceGroup.
@@ -203,16 +222,8 @@ func (ig *InstanceGroup) Update(ctx context.Context, update func(instance string
 			continue
 		}
 
-		var state provider.State
-
-		switch member.Name {
-		case ig.InstanceNameCreating:
-			state = provider.StateCreating
-		case ig.InstanceNameRunning:
-			state = provider.StateRunning
-		case ig.InstanceNameRemoving:
-			state = provider.StateDeleting
-		default:
+		state, ok := ig.stateForName(member.Name)
+		if !ok {
 			continue // Unknown name, skipping...
 		}
 
@@ -229,7 +240,7 @@ func (ig *InstanceGroup) ConnectInfo(ctx context.Context, instance string) (prov
 		return provider.ConnectInfo{}, fmt.Errorf("failed to parse instance name '%s': %w", instance, err)
 	}
 
-	vm, err := ig.getProxmoxVM(ctx, VMID)
+	vm, err := ig.ownedInstance(ctx, VMID)
 	if err != nil {
 		return provider.ConnectInfo{}, fmt.Errorf("failed to retrieve instance vmid='%d': %w", VMID, err)
 	}
@@ -260,21 +271,38 @@ func (ig *InstanceGroup) Decrease(ctx context.Context, instancesToRemove []strin
 			continue
 		}
 
-		if member.Name == ig.InstanceNameCreating {
-			// It must be running to start the deletion
-			continue
+		if member.Name == "" {
+			// No name in the listing is not a foreign name: ask the VM itself, or the default
+			// arm would report our own VM removed and leave it running.
+			nameErr := ig.nameFromNode(ctx, &member)
+			if nameErr != nil {
+				ig.log.Warn("cannot read the name of an instance to remove, will retry", "vmid", member.VMID, "err", nameErr)
+
+				continue
+			}
 		}
 
-		if member.Name == ig.InstanceNameRemoving {
-			// Already deleting...
+		state, owned := ig.stateForName(member.Name)
+
+		switch {
+		case !owned:
+			// Another manager's VM, or a VMID reused since fleeting last saw it. Never touch it.
+			// Report it removed so the provisioner stops asking; Update no longer lists it, so
+			// it is pruned on the next cycle either way. Not an attempt: it must not count
+			// toward batchError.
+			ig.log.Warn("refusing to remove instance not owned by this group", "vmid", member.VMID, "name", member.Name)
+
 			succeeded = append(succeeded, vmid)
-
+		case state == provider.StateCreating:
+			// Must be running to start the deletion; provisioner retries.
 			continue
+		case state == provider.StateDeleting:
+			// Already deleting; count as succeeded without a new request.
+			succeeded = append(succeeded, vmid)
+		case state == provider.StateRunning:
+			ig.log.Info("removing instance", "vmid", member.VMID)
+			toRemove = append(toRemove, &member)
 		}
-
-		ig.log.Info("removing instance", "vmid", member.VMID)
-
-		toRemove = append(toRemove, &member)
 	}
 
 	errs := ig.markInstancesForRemoval(ctx, toRemove)
@@ -294,9 +322,9 @@ func (ig *InstanceGroup) Heartbeat(ctx context.Context, instance string) error {
 		return fmt.Errorf("invalid vm id '%s': %w", instance, err)
 	}
 
-	vm, err := ig.getProxmoxVM(ctx, vmid)
+	vm, err := ig.ownedInstance(ctx, vmid)
 	if err != nil {
-		return err
+		return fmt.Errorf("failed to retrieve instance vmid='%d': %w", vmid, err)
 	}
 
 	// Returns an error if the QEMU agent is not communicating due to an empty result
@@ -320,9 +348,9 @@ func (ig *InstanceGroup) Resume(ctx context.Context, instances []string) ([]stri
 			continue
 		}
 
-		vm, err := ig.getProxmoxVM(ctx, vmid)
+		vm, err := ig.ownedInstance(ctx, vmid)
 		if err != nil {
-			errs = append(errs, fmt.Sprintf("no vm with id '%d'", vmid))
+			errs = append(errs, fmt.Sprintf("vm id '%d': %v", vmid, err))
 			continue
 		}
 
@@ -354,9 +382,9 @@ func (ig *InstanceGroup) Suspend(ctx context.Context, instances []string) ([]str
 			continue
 		}
 
-		vm, err := ig.getProxmoxVM(ctx, vmid)
+		vm, err := ig.ownedInstance(ctx, vmid)
 		if err != nil {
-			errs = append(errs, fmt.Sprintf("no vm with id '%d'", vmid))
+			errs = append(errs, fmt.Sprintf("vm id '%d': %v", vmid, err))
 			continue
 		}
 
