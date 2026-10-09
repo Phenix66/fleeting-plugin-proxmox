@@ -124,6 +124,9 @@ type removalTestServer struct {
 type removalTestMember struct {
 	vmid uint64
 	name string
+	// tags is the tag list the VM's config carries, so a test can give a VM template or
+	// manually applied tags and assert on what a rename does to them.
+	tags string
 	// fetchedName, when set, is the name the VM's config carries (what a rename writes), so a
 	// test can simulate a VM renamed since the pool was listed. status/current keeps serving
 	// the listed name, which pins fetchedName's preference for the config.
@@ -272,7 +275,7 @@ func newRemovalTestGroup(t *testing.T, opts removalTestServer) *InstanceGroup {
 				name = m.fetchedNameAfterStop
 			}
 
-			fmt.Fprintf(w, `{"data":{"digest":%q,"name":%q}}`, removalTestDigest(m.vmid), name)
+			fmt.Fprintf(w, `{"data":{"digest":%q,"name":%q,"tags":%q}}`, removalTestDigest(m.vmid), name, m.tags)
 		case route == "POST config":
 			counts.configPOSTs.Add(1)
 
@@ -438,4 +441,121 @@ func TestMarkInstanceForRemovalRejectsMissingTask(t *testing.T) {
 	require.ErrorIs(t, err, ErrNoTask)
 	require.Equal(t, int64(1), counts.configPOSTs.Load(), "expected exactly one rename POST")
 	require.Zero(t, counts.taskPolls.Load(), "expected the rename never to be waited on")
+}
+
+func TestInstanceGroup_mergedInstanceTags(t *testing.T) {
+	type testCase struct {
+		name      string
+		creating  string
+		running   string
+		removing  string
+		current   string
+		stateTags string
+		expected  string
+	}
+
+	testCases := []testCase{
+		{
+			name:     "no existing tags and no state tags leave the VM untagged",
+			current:  "",
+			stateTags: "",
+			expected: "",
+		},
+		{
+			name:      "state tags are added to an untagged VM",
+			creating:  "fleeting-creating",
+			stateTags: "fleeting-creating",
+			expected:  "fleeting-creating",
+		},
+		{
+			name:      "existing tags are preserved and the state tags are added",
+			creating:  "fleeting-creating",
+			current:   "template-tag,manual-tag",
+			stateTags: "fleeting-creating",
+			expected:  "template-tag,manual-tag,fleeting-creating",
+		},
+		{
+			name:      "leaving a state removes that state's tags and adds the target's",
+			creating:  "fleeting-creating",
+			running:   "fleeting-running",
+			current:   "template-tag,fleeting-creating",
+			stateTags: "fleeting-running",
+			expected:  "template-tag,fleeting-running",
+		},
+		{
+			name:      "tags shared by two states are kept in both",
+			creating:  "keep-me,fleeting-creating",
+			running:   "keep-me,fleeting-running",
+			current:   "template-tag,keep-me,fleeting-creating",
+			stateTags: "keep-me,fleeting-running",
+			expected:  "template-tag,keep-me,fleeting-running",
+		},
+		{
+			name:      "a state tag already on the VM is not duplicated",
+			creating:  "fleeting-creating",
+			current:   "template-tag,fleeting-creating",
+			stateTags: "fleeting-creating",
+			expected:  "template-tag,fleeting-creating",
+		},
+		{
+			name:      "an unconfigured state removes the managed tags it finds",
+			creating: "fleeting-creating",
+			current:  "template-tag,fleeting-creating",
+			stateTags: "",
+			expected: "template-tag",
+		},
+		{
+			name:      "state tags are split on semicolons",
+			creating:  "a;b",
+			current:   "template-tag",
+			stateTags: "a;b",
+			expected:  "template-tag,a,b",
+		},
+		{
+			name:      "existing tags are split on commas and whitespace is dropped",
+			creating:  "fleeting-creating",
+			current:   " template-tag , manual-tag ",
+			stateTags: "fleeting-creating",
+			expected:  "template-tag,manual-tag,fleeting-creating",
+		},
+	}
+
+	for _, testCase := range testCases {
+		t.Run(testCase.name, func(t *testing.T) {
+			ig := InstanceGroup{
+				Settings: Settings{
+					InstanceTagsCreating: testCase.creating,
+					InstanceTagsRunning:  testCase.running,
+					InstanceTagsRemoving: testCase.removing,
+				},
+			}
+
+			require.Equal(t, testCase.expected, ig.mergedInstanceTags(testCase.current, testCase.stateTags))
+		})
+	}
+}
+
+// The removal rename must preserve the tags the group does not manage: the instance's
+// creating tags are replaced by the removing tags while the template's and manually applied
+// tags stay.
+func TestMarkInstanceForRemovalPreservesExistingTags(t *testing.T) {
+	counts := &removalRequestCounts{}
+	ig := newRemovalTestGroup(t, removalTestServer{
+		members: []removalTestMember{
+			{vmid: 100, name: "fleeting-creating", tags: "template-tag,manual-tag,fleeting-creating"},
+		},
+		requests: counts,
+	})
+	ig.InstanceTagsCreating = "fleeting-creating"
+
+	member := &proxmox.ClusterResource{VMID: 100, Type: vmTypeQEMU, Name: "fleeting-creating", Node: "pve-node"}
+
+	err := ig.markInstanceForRemoval(context.Background(), member)
+	require.ErrorIs(t, err, ErrTaskFailed)
+	require.Len(t, counts.renames, 1)
+	require.Equal(t, map[string]any{
+		vmOptName:   "fleeting-removing",
+		vmOptTags:   "template-tag,manual-tag,fleeting-removing",
+		vmOptDigest: removalTestDigest(100),
+	}, counts.renames[0])
 }

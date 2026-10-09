@@ -84,13 +84,16 @@ type Settings struct {
 	// Name to set for instances during removal.
 	InstanceNameRemoving string `json:"instance_name_removing"`
 
-	// Tags to set for instances during creation, semicolon delimited.
+	// Tags to set for instances during creation, semicolon delimited. Tags the instance
+	// already carries are preserved; only the configured tags are added or removed.
 	InstanceTagsCreating string `json:"instance_tags_creating"`
 
-	// Tags to set for running instances, semicolon delimited.
+	// Tags to set for running instances, semicolon delimited. Tags the instance already
+	// carries are preserved; only the configured tags are added or removed.
 	InstanceTagsRunning string `json:"instance_tags_running"`
 
-	// Tags to set for instances during removal, semicolon delimited.
+	// Tags to set for instances during removal, semicolon delimited. Tags the instance
+	// already carries are preserved; only the configured tags are added or removed.
 	InstanceTagsRemoving string `json:"instance_tags_removing"`
 
 	// Disk to increase after cloning.
