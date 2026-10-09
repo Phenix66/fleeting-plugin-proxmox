@@ -132,6 +132,7 @@ func (ig *InstanceGroup) getTemplateCloneOptions(template *proxmox.VirtualMachin
 		Name:    ig.InstanceNameCreating,
 		Pool:    ig.Pool,
 		Storage: ig.Storage,
+		Target:  ig.InstanceTargetNode,
 		Full:    true,
 	}
 

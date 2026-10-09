@@ -46,7 +46,7 @@ const (
 	maxVIRTIOIndex = 15
 )
 
-// Settings: Plguin settings.
+// Settings: Plugin settings.
 type Settings struct {
 	// Proxmox VE URL.
 	URL string `json:"url"`
@@ -98,6 +98,10 @@ type Settings struct {
 
 	// Increase disk to this size after cloning.
 	InstanceAutoresizeSize string `json:"instance_autoresize_size"`
+
+	// Name of the Proxmox VE node to clone instances to.
+	// If unset, instances are cloned onto the node hosting the template.
+	InstanceTargetNode string `json:"instance_target_node"`
 
 	// How often should task status be queried
 	ProxmoxTaskWaitInterval *int `json:"proxmox_task_wait_interval"`

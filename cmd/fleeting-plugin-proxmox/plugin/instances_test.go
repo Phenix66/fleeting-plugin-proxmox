@@ -25,6 +25,7 @@ func TestInstanceGroup_templateCloneOptions(t *testing.T) {
 		name              string
 		isTemplate        bool
 		configuredStorage string
+		targetNode        string
 		expectedFull      bool
 		expectedErr       error
 	}
@@ -58,6 +59,22 @@ func TestInstanceGroup_templateCloneOptions(t *testing.T) {
 			expectedFull:      true,
 			expectedErr:       nil,
 		},
+		{
+			name:              "Template with configured target node",
+			isTemplate:        true,
+			configuredStorage: "local",
+			targetNode:        "pve-target",
+			expectedFull:      true,
+			expectedErr:       nil,
+		},
+		{
+			name:              "VM with configured storage and target node",
+			isTemplate:        false,
+			configuredStorage: "local",
+			targetNode:        "pve-target",
+			expectedFull:      true,
+			expectedErr:       nil,
+		},
 	}
 	for _, testCase := range testCases {
 		t.Run(testCase.name, func(t *testing.T) {
@@ -67,7 +84,8 @@ func TestInstanceGroup_templateCloneOptions(t *testing.T) {
 
 			ig := InstanceGroup{
 				Settings: Settings{
-					Storage: testCase.configuredStorage,
+					Storage:            testCase.configuredStorage,
+					InstanceTargetNode: testCase.targetNode,
 				},
 			}
 
@@ -76,6 +94,7 @@ func TestInstanceGroup_templateCloneOptions(t *testing.T) {
 
 			if err == nil {
 				require.Equal(t, testCase.configuredStorage, result.Storage)
+				require.Equal(t, testCase.targetNode, result.Target)
 				require.Equal(t, testCase.expectedFull, bool(result.Full))
 			}
 		})
