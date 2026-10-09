@@ -4,8 +4,10 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"sync"
 	"time"
+	"unicode"
 
 	"github.com/luthermonson/go-proxmox"
 )
@@ -40,9 +42,17 @@ func (ig *InstanceGroup) deployInstance(ctx context.Context, template *proxmox.V
 		return VMID, fmt.Errorf("failed to find newly deployed instance vmid='%d': %w", VMID, err)
 	}
 
+	// The clone carries the template's tags. The final rename below re-derives its tags from
+	// them rather than from whatever the creating-tag config call above wrote, so the
+	// template's tags survive whichever transition the instance ends in.
+	baseTags := ""
+	if vm.VirtualMachineConfig != nil {
+		baseTags = vm.VirtualMachineConfig.Tags
+	}
+
 	_, err = vm.Config(ctx, proxmox.VirtualMachineOption{
 		Name:  vmOptTags,
-		Value: ig.InstanceTagsCreating,
+		Value: ig.mergedInstanceTags(baseTags, ig.InstanceTagsCreating),
 	})
 	if err != nil {
 		return VMID, fmt.Errorf("failed to get instance config vmid='%d': %w", VMID, err)
@@ -96,7 +106,7 @@ func (ig *InstanceGroup) deployInstance(ctx context.Context, template *proxmox.V
 		},
 		proxmox.VirtualMachineOption{
 			Name:  vmOptTags,
-			Value: newInstanceTags,
+			Value: ig.mergedInstanceTags(baseTags, newInstanceTags),
 		},
 	)
 	if renameErr != nil {
@@ -145,6 +155,60 @@ func (ig *InstanceGroup) getTemplateCloneOptions(template *proxmox.VirtualMachin
 	}
 
 	return cloneOptions, nil
+}
+
+// parseTagList splits a tag list into its tags. The tag settings delimit tags with
+// semicolons, Proxmox delimits them with commas, and both are accepted; whitespace around
+// the tags is dropped.
+func parseTagList(value string) []string {
+	return strings.FieldsFunc(value, func(separator rune) bool {
+		return separator == ';' || separator == ',' || unicode.IsSpace(separator)
+	})
+}
+
+// managedTagSet is the set of every tag this group sets in any instance state. They are the
+// only tags the group ever adds or removes; any other tag on a VM -- the template's, or
+// applied manually -- is left alone.
+func (ig *InstanceGroup) managedTagSet() map[string]bool {
+	managed := make(map[string]bool)
+
+	for _, value := range []string{ig.InstanceTagsCreating, ig.InstanceTagsRunning, ig.InstanceTagsRemoving} {
+		for _, tag := range parseTagList(value) {
+			managed[tag] = true
+		}
+	}
+
+	return managed
+}
+
+// mergedInstanceTags returns the tags an instance should carry while in the state named by
+// stateTags: its current tags with every tag the group manages in any state removed and the
+// state's tags added. Tags the group does not manage are preserved, so the template's tags
+// survive the creating, running and removing transitions.
+func (ig *InstanceGroup) mergedInstanceTags(current string, stateTags string) string {
+	managed := ig.managedTagSet()
+
+	merged := make([]string, 0)
+	seen := make(map[string]bool)
+
+	addTag := func(tag string) {
+		if !seen[tag] {
+			seen[tag] = true
+			merged = append(merged, tag)
+		}
+	}
+
+	for _, tag := range parseTagList(current) {
+		if !managed[tag] {
+			addTag(tag)
+		}
+	}
+
+	for _, tag := range parseTagList(stateTags) {
+		addTag(tag)
+	}
+
+	return strings.Join(merged, ",")
 }
 
 func (ig *InstanceGroup) markStaleInstancesForRemoval(ctx context.Context) error {
@@ -201,6 +265,11 @@ func (ig *InstanceGroup) markInstanceForRemoval(ctx context.Context, instance *p
 	if err == nil {
 		var task *proxmox.Task
 
+		currentTags := ""
+		if vm.VirtualMachineConfig != nil {
+			currentTags = vm.VirtualMachineConfig.Tags
+		}
+
 		options := []proxmox.VirtualMachineOption{
 			{
 				Name:  vmOptName,
@@ -208,7 +277,7 @@ func (ig *InstanceGroup) markInstanceForRemoval(ctx context.Context, instance *p
 			},
 			{
 				Name:  vmOptTags,
-				Value: ig.InstanceTagsRemoving,
+				Value: ig.mergedInstanceTags(currentTags, ig.InstanceTagsRemoving),
 			},
 		}
 

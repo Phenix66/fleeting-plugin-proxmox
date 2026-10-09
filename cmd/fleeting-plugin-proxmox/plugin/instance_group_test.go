@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -156,7 +157,26 @@ const (
 	// increaseTestTemplateID is the VM the fake reports as a template, and so the only vmid
 	// whose clone route exists.
 	increaseTestTemplateID = 200
+
+	// increaseTestTemplateTags are the tags the fake's template VM carries, so a deploy
+	// starts from a VM that already has tags.
+	increaseTestTemplateTags = "template-tag,manual-tag"
 )
+
+// increaseRequestCounts records the body of every config POST the fake served, per vmid, so a
+// test can assert on the tags a deploy wrote at each step. It is safe for concurrent use
+// because Increase deploys its instances in parallel.
+type increaseRequestCounts struct {
+	mu     sync.Mutex
+	byVMID map[int][]map[string]any
+}
+
+func (c *increaseRequestCounts) configsFor(vmid int) []map[string]any {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	return c.byVMID[vmid]
+}
 
 // increaseTestCloneVMIDs are the vmids /cluster/nextid hands out, in order. Increase
 // serialises the nextid/clone pair under its clone mutex, so the first of these is always the
@@ -176,13 +196,15 @@ func increaseTestUPID(taskType string, vmid int) string {
 // instance of a batch fail while the rest come up: Proxmox never accepted the clone, so there
 // is no task and no VM behind it. A ServeMux rather than removalTestServer's switch because
 // Increase drives eleven distinct routes and tells three of them apart only by method.
-func newIncreaseTestGroup(t *testing.T, log hclog.Logger) *InstanceGroup {
+func newIncreaseTestGroup(t *testing.T, log hclog.Logger) (*InstanceGroup, *increaseRequestCounts) {
 	t.Helper()
 
 	var (
 		vmidsHandedOut atomic.Int64
 		clonesSeen     atomic.Int64
 	)
+
+	counts := &increaseRequestCounts{byVMID: make(map[int][]map[string]any)}
 
 	poolMembers := []string{
 		fmt.Sprintf(`{"vmid":%d,"type":"qemu","name":"template","node":%q}`, increaseTestTemplateID, increaseTestNode),
@@ -222,11 +244,23 @@ func newIncreaseTestGroup(t *testing.T, log hclog.Logger) *InstanceGroup {
 		fmt.Fprintf(w, `{"data":{"vmid":%s,"name":"fleeting-creating","status":"running"}}`, r.PathValue("vmid"))
 	})
 
-	mux.HandleFunc("GET "+vmRoute("config"), constant(`{"data":{}}`))
+	mux.HandleFunc("GET "+vmRoute("config"),
+		constant(fmt.Sprintf(`{"data":{"tags":%q}}`, increaseTestTemplateTags)))
 	mux.HandleFunc("GET "+vmRoute("agent/get-osinfo"), constant(`{"data":{"result":{}}}`))
 
 	mux.HandleFunc("POST "+vmRoute("config"), func(w http.ResponseWriter, r *http.Request) {
-		fmt.Fprintf(w, `{"data":%q}`, increaseTestUPID("qmconfig", increaseTestVMID(t, r)))
+		vmid := increaseTestVMID(t, r)
+
+		body := map[string]any{}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Errorf("config POST body: %v", err)
+		}
+
+		counts.mu.Lock()
+		counts.byVMID[vmid] = append(counts.byVMID[vmid], body)
+		counts.mu.Unlock()
+
+		fmt.Fprintf(w, `{"data":%q}`, increaseTestUPID("qmconfig", vmid))
 	})
 
 	mux.HandleFunc("POST "+vmRoute("status/start"), func(w http.ResponseWriter, r *http.Request) {
@@ -296,7 +330,7 @@ func newIncreaseTestGroup(t *testing.T, log hclog.Logger) *InstanceGroup {
 	ig.log = log
 	ig.proxmox = proxmox.NewClient(server.URL)
 
-	return ig
+	return ig, counts
 }
 
 // increaseTestVMID reads the vmid a VM route was called for, so a task UPID can name the VM
@@ -546,11 +580,35 @@ func TestRPCsRefuseForeignInstance(t *testing.T) {
 // that drives Increase at the RPC boundary.
 func TestIncreaseReportsPartialBatch(t *testing.T) {
 	log, logBuffer := newLogBuffer(t)
-	ig := newIncreaseTestGroup(t, log)
+	ig, _ := newIncreaseTestGroup(t, log)
 
 	succeeded, err := ig.Increase(context.Background(), 2)
 
 	require.NoError(t, err, "a partial success reported as an error reaches the provisioner as no instances at all")
 	require.Equal(t, 1, succeeded, "the second clone deployed; the first was refused")
 	require.Regexp(t, `\[WARN\].*failed to deploy some instances: attempted=2 failed=1`, logBuffer.String())
+}
+
+// A deploy must preserve the tags the clone inherited from the template: the creating tags
+// are added to them right after the clone, and the running tags replace the creating tags
+// once the instance is up.
+func TestIncreasePreservesTemplateTags(t *testing.T) {
+	log, _ := newLogBuffer(t)
+	ig, counts := newIncreaseTestGroup(t, log)
+
+	succeeded, err := ig.Increase(context.Background(), 2)
+
+	require.NoError(t, err, "a partial success reported as an error reaches the provisioner as no instances at all")
+	require.Equal(t, 1, succeeded, "the second clone deployed; the first was refused")
+
+	// Only the deployed clone (101) got config POSTs; the refused one (100) never existed.
+	deployed := counts.configsFor(101)
+	require.Len(t, deployed, 2)
+	require.Equal(t, map[string]any{
+		vmOptTags: "template-tag,manual-tag,fleeting-creating",
+	}, deployed[0])
+	require.Equal(t, map[string]any{
+		vmOptName: "fleeting-running",
+		vmOptTags: "template-tag,manual-tag,fleeting-running",
+	}, deployed[1])
 }
