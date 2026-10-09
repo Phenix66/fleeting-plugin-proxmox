@@ -4,7 +4,19 @@ This is a [fleeting](https://gitlab.com/gitlab-org/fleeting/fleeting) plugin for
 
 ## Installation
 
-See [Releases](https://github.com/Phenix66/fleeting-plugin-proxmox/releases) for available versions and installation instructions.
+See [GitLab fleeting documentation](https://docs.gitlab.com/runner/fleet_scaling/fleeting/#install-a-fleeting-plugin)
+
+This plugins OCI registry and namespace is:
+
+```
+ghcr.io/phenix66/fleeting-plugin-proxmox
+```
+
+The following image tags are available:
+
+- Official release versions (e.g. `2.1.0`)
+- `latest`: points to the most recent release
+- `0.0.0-bleeding`: points to the most recent build of the `main` branch.
 
 ## Configuration
 
@@ -61,6 +73,27 @@ After creating a **DEDICATED** user, pool and storage follow procedure below to 
     * `PVESDNAdmin`.
 5. Add following role for the user to the node with the storage, network, template etc.:
     * `PVEAuditor` without propagation.
+
+### Running multiple managers on one host
+
+Give every runner manager its own user, pool, template, and unique `instance_name_creating`,
+`instance_name_running` and `instance_name_removing` values: three different names that no
+other manager uses. The user's permissions should cover only that manager's pool. Proxmox
+checks every VM operation against the pool the VM is in, so a user with rights only on a
+single pool cannot touch another manager's VMs even if a VM ID is reused between them. A
+VM belongs to at most one pool and the plugin looks its template up in its own pool, so
+managers that start from the same image each need their own copy of the template in their
+own pool.
+
+On top of that, apart from the VM it has just cloned, the plugin only renames, deletes, or
+connects to VMs that carry one of its own three names, and it checks the name both in the pool
+listing and on the VM itself before acting. A VM with any other name is left alone. This is what
+protects managers that share a user or a pool, and it only holds once all of them run a plugin
+version with this check: an older one renames any VM it is asked to remove unless the VM carries
+its own creating or removing name, even when the VM ID now belongs to another manager.
+
+Known limitation: managers that share a pool cannot tell each other's VMs apart by any
+instance name they have in common, including a name left at its default.
 
 ## Development
 

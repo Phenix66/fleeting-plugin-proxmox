@@ -2,6 +2,7 @@ package plugin
 
 import (
 	"context"
+	"errors"
 	"sync"
 	"time"
 
@@ -79,9 +80,8 @@ func (ig *InstanceGroup) collectRemovedInstances() {
 }
 
 func (ig *InstanceGroup) collectInstance(ctx context.Context, member proxmox.ClusterResource) {
-	vm, err := ig.getProxmoxVMOnNode(ctx, int(member.VMID), member.Node)
-	if err != nil {
-		ig.log.Error("collector failed to fetch instance info", "vmid", member.VMID, "err", err)
+	vm, usable := ig.fetchToCollect(ctx, &member)
+	if !usable {
 		return
 	}
 
@@ -95,6 +95,13 @@ func (ig *InstanceGroup) collectInstance(ctx context.Context, member proxmox.Clu
 			ig.log.Error("collector failed to stop instance", "vmid", member.VMID, "err", err)
 			return
 		}
+
+		// The stop took at least one task poll; check the name again right before the delete,
+		// which cannot be undone.
+		vm, usable = ig.fetchToCollect(ctx, &member)
+		if !usable {
+			return
+		}
 	}
 
 	task, err := vm.Delete(ctx, nil)
@@ -105,6 +112,22 @@ func (ig *InstanceGroup) collectInstance(ctx context.Context, member proxmox.Clu
 	if err != nil {
 		ig.log.Error("collector failed to delete instance", "vmid", member.VMID, "err", err)
 	}
+}
+
+// fetchToCollect fetches a listed member through getListedVM, logging a failed fetch; false
+// means leave the VM alone.
+func (ig *InstanceGroup) fetchToCollect(ctx context.Context, member *proxmox.ClusterResource) (*proxmox.VirtualMachine, bool) {
+	vm, err := ig.getListedVM(ctx, member)
+	if err != nil {
+		// getListedVM has already logged the refusal; log it otherwise.
+		if !errors.Is(err, ErrNotOwned) {
+			ig.log.Error("collector failed to fetch instance info", "vmid", member.VMID, "err", err)
+		}
+
+		return nil, false
+	}
+
+	return vm, true
 }
 
 // triggerCollection wakes up the collector without blocking. The channel is a

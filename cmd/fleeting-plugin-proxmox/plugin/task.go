@@ -33,10 +33,11 @@ var (
 // classifyTask decides a finished task's outcome from what Task.Ping already populated. It is
 // pure so the branch matrix is table-testable without an HTTP server.
 func classifyTask(status, exitStatus string) error {
-	// Task.Wait returns nil whenever the reported status is anything but running -- including
-	// when a failed or unauthorized /status poll leaves the whole struct blank, which arrives
-	// here as an empty status. Only a task actually observed as stopped can be trusted, so
-	// this deliberately does NOT fall through to the exit status check below: a blank poll has
+	// Task.Wait returns nil for any reported status other than running; a poll that fails
+	// returns an error and never reaches this check. The empty status guarded against here
+	// is a successful poll whose response carried no status field, on a task never yet
+	// populated. Only a task actually observed as stopped can be trusted, so this
+	// deliberately does NOT fall through to the exit status check below: an empty status has
 	// an empty exit status too, which would otherwise read as success.
 	if status != taskStatusStopped {
 		return fmt.Errorf("%w: never observed as stopped (status '%s')", ErrTaskFailed, status)
@@ -76,9 +77,9 @@ func (ig *InstanceGroup) waitTask(ctx context.Context, task *proxmox.Task, timeo
 		return nil
 	}
 
-	// A task that reported no exit status has no log worth fetching: the same blank or
-	// unauthorized response that hid the status hides the log too. Otherwise fetch it best
-	// effort -- a failure to fetch is reported alongside the task failure, never in place of it.
+	// Fetch the log only when the failure carries an exit status: a task never observed as
+	// stopped has none, and no log worth fetching either. The fetch is best effort -- a
+	// failure to fetch is reported alongside the task failure, never in place of it.
 	if task.ExitStatus != "" {
 		logLines, logErr := taskLog(ctx, task)
 

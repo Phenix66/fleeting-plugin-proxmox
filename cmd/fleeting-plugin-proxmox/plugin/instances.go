@@ -14,8 +14,9 @@ const (
 	proxmoxTaskWaitTimeout   = 5 * time.Minute
 	proxmoxAgentStartTimeout = 2 * time.Minute
 
-	vmOptName = "name"
-	vmOptTags = "tags"
+	vmOptName   = "name"
+	vmOptTags   = "tags"
+	vmOptDigest = "digest"
 
 	vmTypeQEMU = "qemu"
 )
@@ -189,20 +190,38 @@ func (ig *InstanceGroup) markStaleInstancesForRemoval(ctx context.Context) error
 func (ig *InstanceGroup) markInstanceForRemoval(ctx context.Context, instance *proxmox.ClusterResource) error {
 	log := ig.log.With("name", instance.Name, "vmid", instance.VMID, "node", instance.Node)
 
-	vm, err := ig.getProxmoxVMOnNode(ctx, int(instance.VMID), instance.Node)
+	vm, err := ig.getListedVM(ctx, instance)
+	if err == nil && fetchedName(vm) == ig.InstanceNameRemoving {
+		// Already marked, by an earlier attempt whose rename the listing has not caught up
+		// with. Renaming it again would change nothing.
+		return nil
+	}
+
 	if err == nil {
 		var task *proxmox.Task
 
-		task, err = vm.Config(ctx,
-			proxmox.VirtualMachineOption{
+		options := []proxmox.VirtualMachineOption{
+			{
 				Name:  vmOptName,
 				Value: ig.InstanceNameRemoving,
 			},
-			proxmox.VirtualMachineOption{
+			{
 				Name:  vmOptTags,
 				Value: ig.InstanceTagsRemoving,
 			},
-		)
+		}
+
+		if vm.VirtualMachineConfig != nil && vm.VirtualMachineConfig.Digest != "" {
+			// getListedVM checked the name on this fetch; the digest makes Proxmox refuse the
+			// rename if the config has changed since, so another manager renaming the VM in
+			// between fails the rename instead of having it overwritten.
+			options = append(options, proxmox.VirtualMachineOption{
+				Name:  vmOptDigest,
+				Value: vm.VirtualMachineConfig.Digest,
+			})
+		}
+
+		task, err = vm.Config(ctx, options...)
 
 		if err == nil && task == nil {
 			// The rename is the only evidence the collector will ever see that this instance

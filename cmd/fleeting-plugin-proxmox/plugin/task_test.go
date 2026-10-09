@@ -22,10 +22,8 @@ func testUPID(taskType string) proxmox.UPID {
 	return proxmox.UPID(fmt.Sprintf("UPID:pve-node:00001A2B:00000000:00000000:%s:100:root@pam:", taskType))
 }
 
-// taskStatusBody builds a /status response. It echoes back upid/node/type/id/user, matching
-// real Proxmox responses: the vendored client's Task.Ping overwrites the whole struct from
-// this payload on every poll, so omitting them would blank out task.UPID after the first poll
-// and crash the second one.
+// taskStatusBody builds a /status response, echoing back upid/node/type/id/user as real
+// Proxmox responses do.
 func taskStatusBody(taskType, status, exitStatus string) string {
 	return fmt.Sprintf(`{"data":{"upid":%q,"node":"pve-node","type":%q,"id":"100","user":"root@pam","status":%q,"exitstatus":%q}}`,
 		testUPID(taskType), taskType, status, exitStatus)
@@ -85,9 +83,9 @@ func TestClassifyTask(t *testing.T) {
 			expectText:  "unable to parse volume ID 'local-lvm:'",
 		},
 		{
-			// An unauthorized or empty /status response leaves the task struct blank, which
-			// Task.Wait reports as no-longer-running. Its exit status is blank too, so falling
-			// through to the exit status check would read a failed poll as success.
+			// A successful poll whose response carries no status field leaves task.Status and
+			// ExitStatus empty, which Task.Wait reports as no-longer-running. Falling through
+			// to the exit status check would read that as success.
 			name:        "blank status poll",
 			expectedErr: ErrTaskFailed,
 			expectText:  "never observed as stopped",
