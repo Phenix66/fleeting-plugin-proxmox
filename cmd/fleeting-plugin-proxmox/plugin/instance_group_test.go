@@ -18,7 +18,7 @@ import (
 )
 
 func TestUnmarshallingPluginSettings(t *testing.T) {
-	settingsJSON := `{"url":"sample_url","template_id": 5}`
+	settingsJSON := `{"url":"sample_url","template_id": 5,"instance_target_node":"pve-target"}`
 	instance := InstanceGroup{}
 
 	err := json.Unmarshal([]byte(settingsJSON), &instance)
@@ -26,6 +26,7 @@ func TestUnmarshallingPluginSettings(t *testing.T) {
 
 	require.Equal(t, "sample_url", instance.URL)
 	require.Equal(t, 5, *instance.TemplateID)
+	require.Equal(t, "pve-target", instance.InstanceTargetNode)
 }
 
 func TestShutdownIsIdempotent(t *testing.T) {
