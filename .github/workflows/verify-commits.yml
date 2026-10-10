@@ -15,13 +15,13 @@ jobs:
     timeout-minutes: 5
     env:
       GH_TOKEN: ${{ github.token }}
+      PR_NUMBER: ${{ github.event.number }}
     steps:
       - name: Verify PR commits are signed off and verified
         run: |
           set -euo pipefail
 
-          pr_number="${GITHUB_EVENT_NUMBER}"
-          commits="$(gh api --paginate "repos/${GITHUB_REPOSITORY}/pulls/${pr_number}/commits")"
+          commits="$(gh api --paginate "repos/${GITHUB_REPOSITORY}/pulls/${PR_NUMBER}/commits")"
 
           # Returns success if the commit message contains a Signed-off-by line
           # matching the author name exactly and the author email (case-insensitive).
