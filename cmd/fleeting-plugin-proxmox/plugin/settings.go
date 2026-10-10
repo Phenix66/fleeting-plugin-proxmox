@@ -127,10 +127,6 @@ func (s *Settings) FillWithDefaults() {
 		s.InstanceNameRemoving = DefaultInstanceNameRemoving
 	}
 
-	if s.InstanceNetworkProtocol == "" {
-		s.InstanceNetworkProtocol = DefaultInstanceNetworkProtocol
-	}
-
 	if s.ProxmoxTaskWaitInterval == nil {
 		s.ProxmoxTaskWaitInterval = new(int)
 		*s.ProxmoxTaskWaitInterval = DefaultProxmoxTaskWaitInterval

@@ -233,3 +233,112 @@ func TestInstanceGroup_getProxmoxCredentials(t *testing.T) {
 	require.Equal(t, "oQcW8N246FODI6Qui", credentials.Username)
 	require.Equal(t, `88u3[kKLJ{gU7A£fhWq`, credentials.Password)
 }
+
+func TestInstanceGroup_getProxmoxClientErrors(t *testing.T) {
+	tempDir := t.TempDir()
+	credentialsPath := path.Join(tempDir, "credentials.json")
+
+	require.NoError(t, os.WriteFile(credentialsPath, []byte(`{"realm": "pve","username": "test","password": "secret"}`), 0o600))
+
+	t.Run("unparseable URL", func(t *testing.T) {
+		ig := InstanceGroup{
+			Settings: Settings{
+				URL:                 "http://exa mple.com",
+				CredentialsFilePath: credentialsPath,
+			},
+		}
+
+		_, err := ig.getProxmoxClient()
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "failed to parse URL")
+	})
+
+	t.Run("missing credentials file", func(t *testing.T) {
+		ig := InstanceGroup{
+			Settings: Settings{
+				URL:                 "https://example.com",
+				CredentialsFilePath: path.Join(tempDir, "does-not-exist.json"),
+			},
+		}
+
+		_, err := ig.getProxmoxClient()
+		require.ErrorIs(t, err, os.ErrNotExist)
+		require.Contains(t, err.Error(), "failed to open credentials file")
+	})
+}
+
+func TestGetProxmoxVMAbsentFromPool(t *testing.T) {
+	ig := newRemovalTestGroup(t, removalTestServer{
+		members: []removalTestMember{{vmid: 100, name: "fleeting-running"}},
+	})
+
+	vm, err := ig.getProxmoxVM(context.Background(), 999)
+	require.ErrorIs(t, err, ErrNotFound)
+	require.Nil(t, vm)
+}
+
+func TestGetProxmoxVMPoolFetchFailure(t *testing.T) {
+	ig := newRemovalTestGroup(t, removalTestServer{failPaths: []string{"/pools"}})
+
+	vm, err := ig.getProxmoxVM(context.Background(), 100)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "failed to get pool")
+	require.Nil(t, vm)
+}
+
+// findPoolMember only looks at VM pool members: a container that happens to hold the vmid is
+// not the VM.
+func TestFindPoolMemberIgnoresNonQEMUMembers(t *testing.T) {
+	ig := newRemovalTestGroup(t, removalTestServer{
+		members: []removalTestMember{{vmid: 100, name: "fleeting-running", memberType: "lxc"}},
+	})
+
+	member, err := ig.findPoolMember(context.Background(), 100)
+	require.ErrorIs(t, err, ErrNotFound)
+	require.Zero(t, member.VMID)
+}
+
+func TestGetProxmoxVMOnNodeErrors(t *testing.T) {
+	t.Run("node fetch fails", func(t *testing.T) {
+		ig := newRemovalTestGroup(t, removalTestServer{failPaths: []string{"/nodes/pve-node/status"}})
+
+		vm, err := ig.getProxmoxVMOnNode(context.Background(), 100, "pve-node")
+		require.Error(t, err)
+		require.Nil(t, vm)
+		require.Contains(t, err.Error(), "failed to get node")
+	})
+
+	t.Run("vm fetch fails", func(t *testing.T) {
+		ig := newRemovalTestGroup(t, removalTestServer{failPaths: []string{"/status/current"}})
+
+		vm, err := ig.getProxmoxVMOnNode(context.Background(), 100, "pve-node")
+		require.Error(t, err)
+		require.Nil(t, vm)
+		require.Contains(t, err.Error(), "failed to get vm")
+	})
+}
+
+// ownedInstance and getListedVM surface a failed fetch as an error rather than acting on a
+// half-read VM.
+func TestOwnedInstanceFetchFailure(t *testing.T) {
+	ig := newRemovalTestGroup(t, removalTestServer{
+		members:   []removalTestMember{{vmid: 100, name: "fleeting-running"}},
+		failPaths: []string{"/status/current"},
+	})
+
+	vm, err := ig.ownedInstance(context.Background(), 100)
+	require.Error(t, err)
+	require.NotErrorIs(t, err, ErrNotOwned)
+	require.Nil(t, vm)
+}
+
+func TestGetListedVMAccessFailure(t *testing.T) {
+	ig := newRemovalTestGroup(t, removalTestServer{failPaths: []string{"/status/current"}})
+
+	member := &proxmox.ClusterResource{VMID: 100, Type: vmTypeQEMU, Name: "fleeting-removing", Node: "pve-node"}
+
+	vm, err := ig.getListedVM(context.Background(), member)
+	require.Error(t, err)
+	require.NotErrorIs(t, err, ErrNotOwned)
+	require.Nil(t, vm)
+}

@@ -577,6 +577,134 @@ func Test_determineAddresses(t *testing.T) {
 			expectedInternalAddress: "",
 			expectedExternalAddress: "2001:4860:4860::8888",
 		},
+		{
+			name: "Multiple interfaces with a requested interface - should not be ambiguous",
+
+			requestedInterface: "eth1",
+			requestedProtocol:  NetworkProtocolIPv4,
+			networkInterfaces: []*proxmox.AgentNetworkIface{
+				{
+					Name:            "eth0",
+					HardwareAddress: "12:34:56:AB:CD:EF",
+					IPAddresses: []*proxmox.AgentNetworkIPAddress{
+						{
+							IPAddressType: NetworkProtocolIPv4,
+							IPAddress:     "192.168.0.1",
+						},
+					},
+				},
+				{
+					Name:            "eth1",
+					HardwareAddress: "12:34:56:AB:CD:E1",
+					IPAddresses: []*proxmox.AgentNetworkIPAddress{
+						{
+							IPAddressType: NetworkProtocolIPv4,
+							IPAddress:     "10.0.0.2",
+						},
+						{
+							IPAddressType: NetworkProtocolIPv4,
+							IPAddress:     "93.184.216.34",
+						},
+					},
+				},
+			},
+
+			expectedError:           nil,
+			expectedInternalAddress: "10.0.0.2",
+			expectedExternalAddress: "93.184.216.34",
+		},
+		{
+			name: "Requested interface not present - should return ErrNoIPAddress",
+
+			requestedInterface: "eth9",
+			requestedProtocol:  NetworkProtocolIPv4,
+			networkInterfaces: []*proxmox.AgentNetworkIface{
+				{
+					Name:            "eth0",
+					HardwareAddress: "12:34:56:AB:CD:EF",
+					IPAddresses: []*proxmox.AgentNetworkIPAddress{
+						{
+							IPAddressType: NetworkProtocolIPv4,
+							IPAddress:     "192.168.0.1",
+						},
+					},
+				},
+			},
+
+			expectedError:           ErrNoIPAddress,
+			expectedInternalAddress: "",
+			expectedExternalAddress: "",
+		},
+		{
+			name: "Unparseable IP addresses - should be skipped",
+
+			requestedInterface: "ens18",
+			requestedProtocol:  NetworkProtocolAny,
+			networkInterfaces: []*proxmox.AgentNetworkIface{
+				{
+					Name:            "ens18",
+					HardwareAddress: "12:34:56:AB:CD:EF",
+					IPAddresses: []*proxmox.AgentNetworkIPAddress{
+						{
+							IPAddressType: NetworkProtocolIPv4,
+							IPAddress:     "not-an-ip",
+						},
+						{
+							IPAddressType: NetworkProtocolIPv6,
+							IPAddress:     "also-not-an-ip",
+						},
+					},
+				},
+			},
+
+			expectedError:           ErrNoIPAddress,
+			expectedInternalAddress: "",
+			expectedExternalAddress: "",
+		},
+		{
+			name: "IPv6 link-local address - should not be used as internal or external",
+
+			requestedInterface: "ens18",
+			requestedProtocol:  NetworkProtocolIPv6,
+			networkInterfaces: []*proxmox.AgentNetworkIface{
+				{
+					Name:            "ens18",
+					HardwareAddress: "12:34:56:AB:CD:EF",
+					IPAddresses: []*proxmox.AgentNetworkIPAddress{
+						{
+							IPAddressType: NetworkProtocolIPv6,
+							IPAddress:     "fe80::1",
+						},
+					},
+				},
+			},
+
+			expectedError:           ErrNoIPAddress,
+			expectedInternalAddress: "",
+			expectedExternalAddress: "",
+		},
+		{
+			name: "Only IPv6 unspecified address - should skip and return empty",
+
+			requestedInterface: "ens18",
+			requestedProtocol:  NetworkProtocolIPv6,
+			networkInterfaces: []*proxmox.AgentNetworkIface{
+				{
+					Name:            "ens18",
+					HardwareAddress: "12:34:56:AB:CD:EF",
+					IPAddresses: []*proxmox.AgentNetworkIPAddress{
+						{
+							IPAddressType: NetworkProtocolIPv6,
+							IPAddress:     "::",
+						},
+					},
+				},
+			},
+
+			expectedError:           ErrNoIPAddress,
+			expectedInternalAddress: "",
+			expectedExternalAddress: "",
+		},
 	}
 
 	for _, testCase := range tests {

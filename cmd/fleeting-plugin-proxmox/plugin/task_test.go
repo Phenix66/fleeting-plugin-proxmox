@@ -147,3 +147,86 @@ func TestInstanceGroup_waitTaskNilTask(t *testing.T) {
 	require.NoError(t, group.waitTask(context.Background(), nil, time.Second))
 	require.Regexp(t, `\[WARN\].*Proxmox returned no task to wait on`, logBuffer.String())
 }
+
+// A task that keeps reporting running times out instead of being trusted: Wait's timeout is
+// surfaced to the caller.
+func TestInstanceGroup_waitTaskTimesOutOnRunningTask(t *testing.T) {
+	server := httptest.NewServer(taskHandler(t, "qmclone", "running", "", ""))
+	defer server.Close()
+
+	task := proxmox.NewTask(testTaskUPID, proxmox.NewClient(server.URL))
+
+	err := newWaitTestGroup().waitTask(context.Background(), task, 100*time.Millisecond)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "failed while waiting for task")
+}
+
+// A poll whose response carries no status field is never trusted as success, and a task that
+// was never observed as stopped has no log to fetch.
+func TestInstanceGroup_waitTaskBlankStatusDoesNotFetchLog(t *testing.T) {
+	var logFetched atomic.Bool
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasSuffix(r.URL.Path, "/log") {
+			logFetched.Store(true)
+		}
+
+		fmt.Fprint(w, taskStatusBody("qmclone", "", ""))
+	}))
+	defer server.Close()
+
+	task := proxmox.NewTask(testTaskUPID, proxmox.NewClient(server.URL))
+
+	err := newWaitTestGroup().waitTask(context.Background(), task, time.Second)
+	require.ErrorIs(t, err, ErrTaskFailed)
+	require.Contains(t, err.Error(), "never observed as stopped")
+	require.False(t, logFetched.Load(), "a task never observed as stopped has no log worth fetching")
+}
+
+// A failure to fetch the task log is reported alongside the task failure, never in place of
+// it: the exit status is what the caller acts on.
+func TestInstanceGroup_waitTaskLogFailureDoesNotMaskTaskFailure(t *testing.T) {
+	log, logBuffer := newLogBuffer(t)
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasSuffix(r.URL.Path, "/log") {
+			http.Error(w, "log unavailable", http.StatusInternalServerError)
+
+			return
+		}
+
+		fmt.Fprint(w, taskStatusBody("qmclone", taskStatusStopped, "unable to parse volume ID 'local-lvm:'"))
+	}))
+	defer server.Close()
+
+	group := newWaitTestGroup()
+	group.log = log
+
+	task := proxmox.NewTask(testTaskUPID, proxmox.NewClient(server.URL))
+
+	err := group.waitTask(context.Background(), task, time.Second)
+	require.ErrorIs(t, err, ErrTaskFailed)
+	require.Contains(t, err.Error(), "unable to parse volume ID 'local-lvm:'")
+	require.Contains(t, logBuffer.String(), "logerr", "the failed log fetch must be logged")
+}
+
+// taskLog orders the page by line number: Proxmox's log endpoint keys its lines by number,
+// and a JSON object's key order is not that order.
+func TestTaskLogOrdersLinesByLineNumber(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !strings.HasSuffix(r.URL.Path, "/log") {
+			http.NotFound(w, r)
+
+			return
+		}
+
+		fmt.Fprint(w, `{"data":[{"n":3,"t":"third line"},{"n":1,"t":"first line"},{"n":2,"t":"second line"}]}`)
+	}))
+	defer server.Close()
+
+	task := proxmox.NewTask(testTaskUPID, proxmox.NewClient(server.URL))
+
+	lines, err := taskLog(context.Background(), task)
+	require.NoError(t, err)
+	require.Equal(t, []string{"first line", "second line", "third line"}, lines)
+}
