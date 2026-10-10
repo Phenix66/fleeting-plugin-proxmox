@@ -116,14 +116,27 @@ type removalTestServer struct {
 
 	// requests tallies the requests the fake served; nil means do not report them.
 	requests *removalRequestCounts
+
+	// failPaths makes the fake answer 500 to every request whose path contains one of the
+	// substrings, so a test can fail one route of the fake without rebuilding it.
+	failPaths []string
+
+	// networkIfaceBodies, when non-empty, are served one per network-get-interfaces request
+	// in order, the last one repeating; they let a test simulate an interface list that
+	// changes while ConnectInfo retries.
+	networkIfaceBodies []string
+
+	networkIfaceCalls *atomic.Int64
 }
 
 // removalTestMember is one VM in the fake's pool. It appears in the pool listing and, under its
 // own vmid, answers the status and config fetches and the rename, stop, delete, agent OS-info,
-// resume and suspend requests.
+// resume, suspend and network-interfaces requests.
 type removalTestMember struct {
 	vmid uint64
 	name string
+	// memberType is the type the pool listing reports for the member; empty means qemu.
+	memberType string
 	// tags is the tag list the VM's config carries, so a test can give a VM template or
 	// manually applied tags and assert on what a rename does to them.
 	tags string
@@ -134,7 +147,27 @@ type removalTestMember struct {
 	// fetchedNameAfterStop, when set, replaces fetchedName once the VM has been asked to stop,
 	// so a test can simulate a VM renamed while the collector waited for the stop.
 	fetchedNameAfterStop string
+	// ifaces is the raw JSON array the VM's agent reports as its network interfaces; empty
+	// means defaultRemovalTestIfaces.
+	ifaces string
+	// osinfoFails makes the VM's agent/get-osinfo answer 500, so a test can simulate a dead
+	// QEMU agent.
+	osinfoFails bool
+	// stopFails makes the VM's stop task report a failure, so a test can simulate a stop
+	// that never completed.
+	stopFails bool
+	// vmStatus is the status the VM's status/current reports; empty means running.
+	vmStatus string
+	// noDigest makes the VM's config report no digest, so a rename is sent without one.
+	noDigest bool
+	// deleteFails makes the VM's delete task report a failure, so a test can simulate a
+	// delete that never completed.
+	deleteFails bool
 }
+
+// defaultRemovalTestIfaces is what a fake member reports for network-get-interfaces unless a
+// test gives it its own list: one interface holding a private and a global IPv4 address.
+const defaultRemovalTestIfaces = `{"name":"eth0","hardware-address":"12:34:56:AB:CD:EF","ip-addresses":[{"ip-address-type":"ipv4","ip-address":"192.168.0.1","prefix":24},{"ip-address-type":"ipv4","ip-address":"8.8.8.8","prefix":32}]}`
 
 // removalRequestCounts records how often the fake was asked for each of the two things a
 // rename can do, and every request it served, so a test can assert on what was *not*
@@ -151,6 +184,19 @@ type removalRequestCounts struct {
 // removalTestDigest is the config digest the fake serves for vmid.
 func removalTestDigest(vmid uint64) string {
 	return fmt.Sprintf("digest-%d", vmid)
+}
+
+// upidVMID reads the vmid out of a /tasks/<upid>/status path, so the fake can answer a task
+// by the member its UPID names.
+func upidVMID(path string) string {
+	upid := strings.TrimSuffix(strings.TrimPrefix(path, "/nodes/pve-node/tasks/"), "/status")
+
+	fields := strings.Split(upid, ":")
+	if len(fields) < 7 {
+		return ""
+	}
+
+	return fields[6]
 }
 
 // requestsFor returns the recorded request entries for /qemu/<vmid> itself (the route a VM
@@ -203,6 +249,10 @@ func newRemovalTestGroup(t *testing.T, opts removalTestServer) *InstanceGroup {
 		counts = &removalRequestCounts{}
 	}
 
+	if opts.networkIfaceCalls == nil {
+		opts.networkIfaceCalls = &atomic.Int64{}
+	}
+
 	renameUPID := testUPID("qmconfig")
 	renameTask := taskHandler(t, "qmconfig", taskStatusStopped, "VM is locked (clone)", "TASK ERROR: VM is locked (clone)")
 	stopTask := taskHandler(t, "qmstop", taskStatusStopped, taskExitStatusOK, "")
@@ -222,17 +272,34 @@ func newRemovalTestGroup(t *testing.T, opts removalTestServer) *InstanceGroup {
 	memberByVMID := make(map[string]removalTestMember, len(members))
 
 	for _, member := range members {
+		memberType := member.memberType
+		if memberType == "" {
+			memberType = vmTypeQEMU
+		}
+
 		poolMembers = append(poolMembers,
-			fmt.Sprintf(`{"vmid":%d,"type":"qemu","name":%q,"node":"pve-node"}`, member.vmid, member.name))
+			fmt.Sprintf(`{"vmid":%d,"type":%q,"name":%q,"node":"pve-node"}`, member.vmid, memberType, member.name))
 		memberByVMID[strconv.FormatUint(member.vmid, 10)] = member
 	}
 
 	poolBody := fmt.Sprintf(`{"data":[{"poolid":"test-pool","members":[%s]}]}`, strings.Join(poolMembers, ","))
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// A client built by getProxmoxClient prefixes every route with /api2/json, as does
+		// real Proxmox; answer both spellings.
+		r.URL.Path = strings.TrimPrefix(r.URL.Path, "/api2/json")
+
 		counts.mu.Lock()
 		counts.paths = append(counts.paths, r.Method+" "+r.URL.Path)
 		counts.mu.Unlock()
+
+		for _, failPath := range opts.failPaths {
+			if strings.Contains(r.URL.Path, failPath) {
+				http.Error(w, "injected failure", http.StatusInternalServerError)
+
+				return
+			}
+		}
 
 		// Per-VM routes are "<method> <suffix>" of /nodes/pve-node/qemu/<vmid>[/<suffix>], set
 		// only for a listed vmid.
@@ -260,19 +327,38 @@ func newRemovalTestGroup(t *testing.T, opts removalTestServer) *InstanceGroup {
 			// the answer, so answering a stop with the rename's status would turn it into one.
 			switch {
 			case strings.Contains(r.URL.Path, ":qmstop:"):
-				stopTask(w, r)
+				if member, ok := memberByVMID[upidVMID(r.URL.Path)]; ok && member.stopFails {
+					fmt.Fprint(w, taskStatusBody("qmstop", taskStatusStopped, "TASK ERROR: VM is locked (clone)"))
+				} else {
+					stopTask(w, r)
+				}
 			case strings.Contains(r.URL.Path, ":qmdestroy:"):
-				destroyTask(w, r)
+				if member, ok := memberByVMID[upidVMID(r.URL.Path)]; ok && member.deleteFails {
+					fmt.Fprint(w, taskStatusBody("qmdestroy", taskStatusStopped, "TASK ERROR: device write failed"))
+				} else {
+					destroyTask(w, r)
+				}
 			default:
 				renameTask(w, r)
 			}
 		case route == "GET status/current":
-			fmt.Fprintf(w, `{"data":{"vmid":%d,"name":%q,"status":"running"}}`, m.vmid, m.name)
+			status := m.vmStatus
+			if status == "" {
+				status = "running"
+			}
+
+			fmt.Fprintf(w, `{"data":{"vmid":%d,"name":%q,"status":%q}}`, m.vmid, m.name, status)
 		case route == "GET config":
 			// An empty config name falls back to the status name, as an absent one would.
 			name := m.fetchedName
 			if m.fetchedNameAfterStop != "" && counts.requested(m.vmid, http.MethodPost, "/status/stop") {
 				name = m.fetchedNameAfterStop
+			}
+
+			if m.noDigest {
+				fmt.Fprintf(w, `{"data":{"name":%q,"tags":%q}}`, name, m.tags)
+
+				return
 			}
 
 			fmt.Fprintf(w, `{"data":{"digest":%q,"name":%q,"tags":%q}}`, removalTestDigest(m.vmid), name, m.tags)
@@ -294,7 +380,29 @@ func newRemovalTestGroup(t *testing.T, opts removalTestServer) *InstanceGroup {
 		case route == "DELETE ":
 			fmt.Fprintf(w, `{"data":%q}`, testUPID("qmdestroy"))
 		case route == "GET agent/get-osinfo":
+			if m.osinfoFails {
+				http.Error(w, "agent unavailable", http.StatusInternalServerError)
+
+				return
+			}
+
 			fmt.Fprint(w, `{"data":{"result":{}}}`)
+		case route == "GET agent/network-get-interfaces":
+			ifaces := m.ifaces
+			if ifaces == "" {
+				ifaces = defaultRemovalTestIfaces
+			}
+
+			if len(opts.networkIfaceBodies) > 0 {
+				call := int(opts.networkIfaceCalls.Add(1)) - 1
+				if call >= len(opts.networkIfaceBodies) {
+					call = len(opts.networkIfaceBodies) - 1
+				}
+
+				ifaces = opts.networkIfaceBodies[call]
+			}
+
+			fmt.Fprintf(w, `{"data":{"result":[%s]}}`, ifaces)
 		case route == "POST status/resume":
 			fmt.Fprintf(w, `{"data":%q}`, testUPID("qmresume"))
 		case route == "POST status/suspend":
@@ -315,6 +423,7 @@ func newRemovalTestGroup(t *testing.T, opts removalTestServer) *InstanceGroup {
 	ig.InstanceNameRemoving = "fleeting-removing"
 	ig.InstanceTagsRemoving = "fleeting-removing"
 	ig.log = log
+	ig.URL = server.URL
 	ig.proxmox = proxmox.NewClient(server.URL)
 	ig.instanceCollectionTrigger = make(chan struct{}, 1)
 
@@ -456,10 +565,10 @@ func TestInstanceGroup_mergedInstanceTags(t *testing.T) {
 
 	testCases := []testCase{
 		{
-			name:     "no existing tags and no state tags leave the VM untagged",
-			current:  "",
+			name:      "no existing tags and no state tags leave the VM untagged",
+			current:   "",
 			stateTags: "",
-			expected: "",
+			expected:  "",
 		},
 		{
 			name:      "state tags are added to an untagged VM",
@@ -499,10 +608,10 @@ func TestInstanceGroup_mergedInstanceTags(t *testing.T) {
 		},
 		{
 			name:      "an unconfigured state removes the managed tags it finds",
-			creating: "fleeting-creating",
-			current:  "template-tag,fleeting-creating",
+			creating:  "fleeting-creating",
+			current:   "template-tag,fleeting-creating",
 			stateTags: "",
-			expected: "template-tag",
+			expected:  "template-tag",
 		},
 		{
 			name:      "state tags are split on semicolons",
@@ -558,4 +667,139 @@ func TestMarkInstanceForRemovalPreservesExistingTags(t *testing.T) {
 		vmOptTags:   "template-tag,manual-tag,fleeting-removing",
 		vmOptDigest: removalTestDigest(100),
 	}, counts.renames[0])
+}
+
+// The stale sweep marks only VMs still listed under InstanceNameCreating; running and
+// removing members are left alone, and a pool that cannot be listed fails the sweep.
+func TestMarkStaleInstancesForRemoval(t *testing.T) {
+	t.Run("no stale instances means no rename", func(t *testing.T) {
+		counts := &removalRequestCounts{}
+		ig := newRemovalTestGroup(t, removalTestServer{
+			members: []removalTestMember{
+				{vmid: 100, name: "fleeting-running"},
+				{vmid: 101, name: "fleeting-removing"},
+			},
+			requests: counts,
+		})
+
+		err := ig.markStaleInstancesForRemoval(context.Background())
+		require.NoError(t, err)
+		require.Zero(t, counts.configPOSTs.Load())
+	})
+
+	t.Run("only creating members are marked", func(t *testing.T) {
+		log, _ := newLogBuffer(t)
+		counts := &removalRequestCounts{}
+		ig := newRemovalTestGroup(t, removalTestServer{
+			log: log,
+			members: []removalTestMember{
+				{vmid: 100, name: "fleeting-creating"},
+				{vmid: 101, name: "fleeting-running"},
+			},
+			requests: counts,
+		})
+
+		err := ig.markStaleInstancesForRemoval(context.Background())
+
+		// The rename task fails by default; the sweep must swallow that and keep starting.
+		require.NoError(t, err)
+		require.Equal(t, int64(1), counts.configPOSTs.Load())
+		require.False(t, counts.requested(101, http.MethodPost, ""), "a running instance was renamed: %v", counts.requestsFor(101))
+	})
+
+	t.Run("pool fetch failure fails the sweep", func(t *testing.T) {
+		ig := newRemovalTestGroup(t, removalTestServer{failPaths: []string{"/pools"}})
+
+		err := ig.markStaleInstancesForRemoval(context.Background())
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "failed to get pool")
+	})
+}
+
+// A clone of a non-template VM without configured storage is refused before anything is
+// asked of Proxmox.
+func TestCloneTemplateReportsCloneOptionsError(t *testing.T) {
+	ig := newWaitTestGroup()
+
+	template := &proxmox.VirtualMachine{}
+
+	vmid, task, err := ig.cloneTemplate(context.Background(), template, new(sync.Mutex))
+	require.ErrorIs(t, err, ErrCloneVMWithoutConfiguredStorage)
+	require.Equal(t, -1, vmid)
+	require.Nil(t, task)
+}
+
+// The digest is sent only when the fetch carried one: it is the proof that the config has
+// not changed since the name was checked, and an absent digest has nothing to prove.
+func TestMarkInstanceForRemovalOmitsAbsentDigest(t *testing.T) {
+	counts := &removalRequestCounts{}
+	ig := newRemovalTestGroup(t, removalTestServer{
+		members: []removalTestMember{
+			{vmid: 100, name: "fleeting-creating", noDigest: true},
+		},
+		requests: counts,
+	})
+
+	member := &proxmox.ClusterResource{VMID: 100, Type: vmTypeQEMU, Name: "fleeting-creating", Node: "pve-node"}
+
+	err := ig.markInstanceForRemoval(context.Background(), member)
+	require.ErrorIs(t, err, ErrTaskFailed)
+	require.Len(t, counts.renames, 1)
+	require.Equal(t, map[string]any{
+		vmOptName: "fleeting-removing",
+		vmOptTags: "fleeting-removing",
+	}, counts.renames[0])
+}
+
+func TestIsProxmoxResourceAnInstance(t *testing.T) {
+	templateID := 200
+
+	ig := &InstanceGroup{Settings: Settings{TemplateID: &templateID}}
+
+	tests := []struct {
+		name   string
+		member proxmox.ClusterResource
+		want   bool
+	}{
+		{name: "a qemu member is an instance", member: proxmox.ClusterResource{Type: vmTypeQEMU, VMID: 100}, want: true},
+		{name: "the template is not an instance", member: proxmox.ClusterResource{Type: vmTypeQEMU, VMID: 200}},
+		{name: "a non-qemu member is not an instance", member: proxmox.ClusterResource{Type: "lxc", VMID: 100}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			require.Equal(t, tt.want, ig.isProxmoxResourceAnInstance(tt.member))
+		})
+	}
+}
+
+func TestParseTagList(t *testing.T) {
+	tests := []struct {
+		name  string
+		value string
+		want  []string
+	}{
+		{name: "empty", value: ""},
+		{name: "single tag", value: "a", want: []string{"a"}},
+		{name: "semicolon delimited", value: "a;b", want: []string{"a", "b"}},
+		{name: "comma delimited", value: "a,b", want: []string{"a", "b"}},
+		{name: "mixed delimiters and whitespace", value: " a;b, c ", want: []string{"a", "b", "c"}},
+		{name: "consecutive and leading separators", value: ";;a,,b", want: []string{"a", "b"}},
+		{name: "only separators", value: " ; , "},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			parsed := parseTagList(tt.value)
+
+			// The empty result may be a nil or an empty slice depending on the Go version.
+			if len(tt.want) == 0 {
+				require.Empty(t, parsed)
+
+				return
+			}
+
+			require.Equal(t, tt.want, parsed)
+		})
+	}
 }

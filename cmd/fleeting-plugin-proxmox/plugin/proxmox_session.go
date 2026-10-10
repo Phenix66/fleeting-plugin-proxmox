@@ -2,6 +2,7 @@ package plugin
 
 import (
 	"context"
+	"fmt"
 	"time"
 )
 
@@ -22,23 +23,33 @@ func (ig *InstanceGroup) runSessionTicketRefresher() {
 		case <-ig.sessionTicketRefresherShutdownTrigger:
 			return
 		case <-time.After(sessionTicketRefreshInterval):
-			func() {
-				ctx, cancel := context.WithTimeout(context.Background(), sessionTicketRefreshTimeout)
-				defer cancel()
+			ctx, cancel := context.WithTimeout(context.Background(), sessionTicketRefreshTimeout)
 
-				credentials, err := ig.getProxmoxCredentials()
-				if err != nil {
-					ig.log.Error("failed to refresh proxmox session, could not read credentials", "err", err)
-					return
-				}
+			err := ig.refreshSessionTicket(ctx)
 
-				_, err = ig.proxmox.Ticket(ctx, credentials)
-				if err != nil {
-					ig.log.Error("failed to refresh proxmox session", "err", err)
-				}
+			cancel()
 
+			if err != nil {
+				ig.log.Error("failed to refresh proxmox session", "err", err)
+			} else {
 				ig.log.Info("refreshed proxmox session")
-			}()
+			}
 		}
 	}
+}
+
+// refreshSessionTicket re-authenticates the Proxmox client: it re-reads the credentials file
+// and exchanges the credentials for a fresh ticket.
+func (ig *InstanceGroup) refreshSessionTicket(ctx context.Context) error {
+	credentials, err := ig.getProxmoxCredentials()
+	if err != nil {
+		return fmt.Errorf("could not read credentials: %w", err)
+	}
+
+	_, err = ig.proxmox.Ticket(ctx, credentials)
+	if err != nil {
+		return fmt.Errorf("failed to create proxmox ticket: %w", err)
+	}
+
+	return nil
 }

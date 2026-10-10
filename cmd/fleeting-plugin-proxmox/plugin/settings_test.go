@@ -1,6 +1,8 @@
 package plugin
 
 import (
+	"strconv"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -119,6 +121,19 @@ func TestSettings_checkRequiredFields(t *testing.T) {
 			expectedError: ErrRequiredSettingMissing,
 		},
 		{
+			// TemplateID is set, so the failure must come from max_instances itself.
+			name: "Missing max instances with template id set",
+			settings: Settings{
+				URL:                 sampleURL,
+				CredentialsFilePath: sampleCredentialsPath,
+				Pool:                samplePool,
+				Storage:             sampleStorage,
+				TemplateID:          &sampleTemplateID,
+				MaxInstances:        nil,
+			},
+			expectedError: ErrRequiredSettingMissing,
+		},
+		{
 			name: "No missing parameters",
 			settings: Settings{
 				URL:                 sampleURL,
@@ -142,6 +157,32 @@ func TestSettings_checkRequiredFields(t *testing.T) {
 				InstanceNetworkProtocol: "invalid-protocol",
 			},
 			expectedError: ErrSettingInvalidParameter,
+		},
+		{
+			name: "Valid protocol ipv6",
+			settings: Settings{
+				URL:                     sampleURL,
+				CredentialsFilePath:     sampleCredentialsPath,
+				Pool:                    samplePool,
+				Storage:                 sampleStorage,
+				TemplateID:              &sampleTemplateID,
+				MaxInstances:            &sampleMaxInstances,
+				InstanceNetworkProtocol: NetworkProtocolIPv6,
+			},
+			expectedError: nil,
+		},
+		{
+			name: "Valid protocol any",
+			settings: Settings{
+				URL:                     sampleURL,
+				CredentialsFilePath:     sampleCredentialsPath,
+				Pool:                    samplePool,
+				Storage:                 sampleStorage,
+				TemplateID:              &sampleTemplateID,
+				MaxInstances:            &sampleMaxInstances,
+				InstanceNetworkProtocol: NetworkProtocolAny,
+			},
+			expectedError: nil,
 		},
 	}
 
@@ -195,6 +236,16 @@ func TestSettings_validateInstanceAutoresizeDisk(t *testing.T) {
 			expectedError: nil,
 		},
 		{
+			name:          "Valid virtio0",
+			disk:          "virtio0",
+			expectedError: nil,
+		},
+		{
+			name:          "Valid virtio15",
+			disk:          "virtio15",
+			expectedError: nil,
+		},
+		{
 			name:          "Invalid ide4 - index exceeds max",
 			disk:          "ide4",
 			expectedError: ErrSettingInvalidParameter,
@@ -223,6 +274,12 @@ func TestSettings_validateInstanceAutoresizeDisk(t *testing.T) {
 			name:          "Invalid disk format no index",
 			disk:          "ide",
 			expectedError: ErrSettingInvalidParameter,
+		},
+		{
+			// The index matches the pattern but overflows an int.
+			name:          "Index overflows int",
+			disk:          "ide" + strings.Repeat("9", 30),
+			expectedError: strconv.ErrRange,
 		},
 	}
 

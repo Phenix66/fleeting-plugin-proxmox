@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path"
 	"strconv"
 	"strings"
 	"sync"
@@ -16,6 +18,7 @@ import (
 	hclog "github.com/hashicorp/go-hclog"
 	"github.com/luthermonson/go-proxmox"
 	"github.com/stretchr/testify/require"
+	"gitlab.com/gitlab-org/fleeting/fleeting/provider"
 )
 
 func TestUnmarshallingPluginSettings(t *testing.T) {
@@ -611,4 +614,346 @@ func TestIncreasePreservesTemplateTags(t *testing.T) {
 		vmOptName: "fleeting-running",
 		vmOptTags: "template-tag,manual-tag,fleeting-running",
 	}, deployed[1])
+}
+
+// Update reports each pool member that carries one of this group's names under the state the
+// name maps to, and skips everything else: another manager's VM, the template, and pool
+// members that are not VMs at all.
+func TestUpdateReportsInstanceStates(t *testing.T) {
+	ig := newRemovalTestGroup(t, removalTestServer{
+		members: []removalTestMember{
+			{vmid: 100, name: "fleeting-creating"},
+			{vmid: 101, name: "fleeting-running"},
+			{vmid: 102, name: "fleeting-removing"},
+			{vmid: 103, name: "other-running"},
+			{vmid: 200, name: "template"},
+			{vmid: 300, name: "fleeting-running", memberType: "lxc"},
+		},
+	})
+
+	type reportedInstance struct {
+		id    string
+		state provider.State
+	}
+
+	var reported []reportedInstance
+
+	err := ig.Update(context.Background(), func(id string, state provider.State) {
+		reported = append(reported, reportedInstance{id, state})
+	})
+	require.NoError(t, err)
+	require.Equal(t, []reportedInstance{
+		{"100", provider.StateCreating},
+		{"101", provider.StateRunning},
+		{"102", provider.StateDeleting},
+	}, reported)
+}
+
+func TestUpdatePoolFetchFailure(t *testing.T) {
+	ig := newRemovalTestGroup(t, removalTestServer{failPaths: []string{"/pools"}})
+
+	err := ig.Update(context.Background(), func(string, provider.State) {})
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "failed to get pool")
+}
+
+func TestConnectInfo(t *testing.T) {
+	t.Run("returns the instance addresses", func(t *testing.T) {
+		ig := newRemovalTestGroup(t, removalTestServer{
+			members: []removalTestMember{{vmid: 100, name: "fleeting-running"}},
+		})
+		ig.InstanceNetworkProtocol = NetworkProtocolIPv4
+		connectorConfig := provider.ConnectorConfig{OS: "linux", Protocol: "ssh"}
+		ig.FleetingSettings = provider.Settings{ConnectorConfig: connectorConfig}
+
+		info, err := ig.ConnectInfo(context.Background(), "100")
+		require.NoError(t, err)
+		require.Equal(t, "100", info.ID)
+		require.Equal(t, "192.168.0.1", info.InternalAddr)
+		require.Equal(t, "8.8.8.8", info.ExternalAddr)
+		require.Equal(t, connectorConfig, info.ConnectorConfig)
+	})
+
+	t.Run("prefers IPv6 under the any protocol", func(t *testing.T) {
+		ifaces := `{"name":"eth0","hardware-address":"12:34:56:AB:CD:EF","ip-addresses":[{"ip-address-type":"ipv4","ip-address":"192.168.0.1","prefix":24},{"ip-address-type":"ipv6","ip-address":"fd3b:47fc:de09::1","prefix":64},{"ip-address-type":"ipv6","ip-address":"2001:4860:4860::8888","prefix":128}]}`
+
+		ig := newRemovalTestGroup(t, removalTestServer{
+			members: []removalTestMember{{vmid: 100, name: "fleeting-running", ifaces: ifaces}},
+		})
+		ig.InstanceNetworkProtocol = NetworkProtocolAny
+
+		info, err := ig.ConnectInfo(context.Background(), "100")
+		require.NoError(t, err)
+		require.Equal(t, "fd3b:47fc:de09::1", info.InternalAddr)
+		require.Equal(t, "2001:4860:4860::8888", info.ExternalAddr)
+	})
+
+	t.Run("refuses a non-numeric instance id", func(t *testing.T) {
+		ig := newRemovalTestGroup(t, removalTestServer{})
+
+		_, err := ig.ConnectInfo(context.Background(), "not-a-vmid")
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "failed to parse instance name")
+	})
+
+	// A fetch that yields no usable address is retried, not failed: the agent can report
+	// before the interface has an address.
+	t.Run("retries until the addresses appear", func(t *testing.T) {
+		log, logBuf := newLogBuffer(t)
+		counts := &removalRequestCounts{}
+
+		// The first fetch reports an interface with a loopback hardware address, which is
+		// filtered out and yields no address; the retry reports the real one.
+		ig := newRemovalTestGroup(t, removalTestServer{
+			log: log,
+			members: []removalTestMember{
+				{vmid: 100, name: "fleeting-running"},
+			},
+			networkIfaceBodies: []string{
+				`{"name":"eth0","hardware-address":"00:00:00:00:00:00","ip-addresses":[{"ip-address-type":"ipv4","ip-address":"192.168.0.1","prefix":24}]}`,
+				defaultRemovalTestIfaces,
+			},
+			requests: counts,
+		})
+		ig.InstanceNetworkProtocol = NetworkProtocolIPv4
+
+		info, err := ig.ConnectInfo(context.Background(), "100")
+		require.NoError(t, err)
+		require.Equal(t, "192.168.0.1", info.InternalAddr)
+
+		fetches := 0
+		for _, request := range counts.requestsFor(100) {
+			if strings.Contains(request, "agent/network-get-interfaces") {
+				fetches++
+			}
+		}
+		require.Equal(t, 2, fetches, "the first fetch must be retried: %v", counts.requestsFor(100))
+		require.Regexp(t, `\[ERROR\].*failed to get network interface.*retry=0`, logBuf.String())
+	})
+}
+
+func TestHeartbeat(t *testing.T) {
+	t.Run("refuses a non-numeric instance id", func(t *testing.T) {
+		ig := newRemovalTestGroup(t, removalTestServer{})
+
+		err := ig.Heartbeat(context.Background(), "not-a-vmid")
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "invalid vm id")
+	})
+
+	t.Run("fails when the qemu agent is not answering", func(t *testing.T) {
+		ig := newRemovalTestGroup(t, removalTestServer{
+			members: []removalTestMember{{vmid: 100, name: "fleeting-running", osinfoFails: true}},
+		})
+
+		err := ig.Heartbeat(context.Background(), "100")
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "failed to connect to qemu agent")
+	})
+}
+
+// Resume and Suspend report each instance's own outcome: a batch in which every attempt
+// failed is an error, one in which something succeeded is not, and an unparseable id fails
+// its own slot without touching the others.
+func TestResumeAndSuspend(t *testing.T) {
+	operations := []struct {
+		name    string
+		call    func(ig *InstanceGroup, instances []string) ([]string, error)
+		wantErr error
+		route   string
+	}{
+		{
+			name: "Resume",
+			call: func(ig *InstanceGroup, instances []string) ([]string, error) {
+				return ig.Resume(context.Background(), instances)
+			},
+			wantErr: ErrResumeFailed,
+			route:   "status/resume",
+		},
+		{
+			name: "Suspend",
+			call: func(ig *InstanceGroup, instances []string) ([]string, error) {
+				return ig.Suspend(context.Background(), instances)
+			},
+			wantErr: ErrSuspendFailed,
+			route:   "status/suspend",
+		},
+	}
+
+	for _, operation := range operations {
+		t.Run(operation.name, func(t *testing.T) {
+			t.Run("all instances succeed", func(t *testing.T) {
+				counts := &removalRequestCounts{}
+				ig := newRemovalTestGroup(t, removalTestServer{
+					members: []removalTestMember{
+						{vmid: 100, name: "fleeting-running"},
+						{vmid: 101, name: "fleeting-running"},
+					},
+					requests: counts,
+				})
+
+				succeeded, err := operation.call(ig, []string{"100", "101"})
+				require.NoError(t, err)
+				require.Equal(t, []string{"100", "101"}, succeeded)
+				require.True(t, counts.requested(100, "", operation.route))
+				require.True(t, counts.requested(101, "", operation.route))
+			})
+
+			t.Run("unparseable id fails its own slot", func(t *testing.T) {
+				ig := newRemovalTestGroup(t, removalTestServer{
+					members: []removalTestMember{{vmid: 100, name: "fleeting-running"}},
+				})
+
+				succeeded, err := operation.call(ig, []string{"100", "not-a-vmid"})
+				require.ErrorIs(t, err, operation.wantErr)
+				require.Contains(t, err.Error(), "invalid vm id 'not-a-vmid'")
+				require.Equal(t, []string{"100"}, succeeded)
+			})
+
+			t.Run("refused rename target is not attempted", func(t *testing.T) {
+				ig := newRemovalTestGroup(t, removalTestServer{
+					members:   []removalTestMember{{vmid: 100, name: "fleeting-running"}},
+					failPaths: []string{operation.route},
+				})
+
+				succeeded, err := operation.call(ig, []string{"100"})
+				require.ErrorIs(t, err, operation.wantErr)
+				require.Contains(t, err.Error(), "api call failed for vm id '100'")
+				require.Empty(t, succeeded)
+			})
+		})
+	}
+}
+
+// Init validates the settings, builds the client, sweeps the stale instances, and starts the
+// background workers; it reports the pool as the group id and the configured maximum as its
+// size. A stale instance whose rename fails must not stop the startup.
+func TestInitLifecycle(t *testing.T) {
+	log, _ := newLogBuffer(t)
+
+	tempDir := t.TempDir()
+	credentialsPath := path.Join(tempDir, "credentials.json")
+
+	require.NoError(t, os.WriteFile(credentialsPath, []byte(`{"realm":"pve","username":"test","password":"secret"}`), 0o600))
+
+	maxInstances := 7
+
+	ig := newRemovalTestGroup(t, removalTestServer{log: log})
+	ig.CredentialsFilePath = credentialsPath
+	ig.MaxInstances = &maxInstances
+
+	info, err := ig.Init(context.Background(), log, provider.Settings{})
+	require.NoError(t, err)
+	require.Equal(t, provider.ProviderInfo{ID: "test-pool", MaxSize: 7}, info)
+
+	// Init's stale sweep leaves a collection wake-up pending; the collector may spend up to
+	// collectionWaitAfterTrigger serving it before it notices the shutdown, so the budget
+	// covers that.
+	select {
+	case <-ig.instanceCollectionTrigger:
+	default:
+	}
+
+	done := make(chan error, 1)
+
+	go func() {
+		done <- ig.Shutdown(context.Background())
+	}()
+
+	select {
+	case err := <-done:
+		require.NoError(t, err)
+	case <-time.After(15 * time.Second):
+		t.Fatal("Shutdown after Init did not return: possible deadlock")
+	}
+}
+
+// A pool member that is not in the removal list is not touched.
+func TestDecreaseIgnoresInstancesNotListedForRemoval(t *testing.T) {
+	counts := &removalRequestCounts{}
+	ig := newRemovalTestGroup(t, removalTestServer{
+		members: []removalTestMember{
+			{vmid: 100, name: "fleeting-running"},
+			{vmid: 101, name: "fleeting-running"},
+		},
+		requests: counts,
+	})
+
+	succeeded, err := ig.Decrease(context.Background(), []string{"100"})
+
+	// The one listed instance's rename task fails by default; the other one is untouched.
+	require.ErrorIs(t, err, ErrTaskFailed)
+	require.Empty(t, succeeded)
+	require.Empty(t, counts.requestsFor(101))
+}
+
+// Init fails fast -- before it sleeps or starts any worker -- when it cannot build the
+// client or cannot list the pool for the stale sweep.
+func TestInitFailsFastWhenItCannotReachProxmox(t *testing.T) {
+	maxInstances := 7
+
+	t.Run("client cannot be built", func(t *testing.T) {
+		log, _ := newLogBuffer(t)
+		ig := newRemovalTestGroup(t, removalTestServer{log: log})
+		ig.CredentialsFilePath = path.Join(t.TempDir(), "does-not-exist.json")
+		ig.MaxInstances = &maxInstances
+
+		_, err := ig.Init(context.Background(), log, provider.Settings{})
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "failed to open credentials file")
+
+		requireShutdownReturns(t, ig, "after a failed Init")
+	})
+
+	t.Run("pool cannot be listed", func(t *testing.T) {
+		log, _ := newLogBuffer(t)
+
+		tempDir := t.TempDir()
+		credentialsPath := path.Join(tempDir, "credentials.json")
+		require.NoError(t, os.WriteFile(credentialsPath, []byte(`{"realm":"pve","username":"test","password":"secret"}`), 0o600))
+
+		ig := newRemovalTestGroup(t, removalTestServer{log: log, failPaths: []string{"/pools"}})
+		ig.CredentialsFilePath = credentialsPath
+		ig.MaxInstances = &maxInstances
+
+		_, err := ig.Init(context.Background(), log, provider.Settings{})
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "failed to get pool")
+
+		requireShutdownReturns(t, ig, "after a failed Init")
+	})
+}
+
+// Increase with no template in the pool fails before it asks Proxmox to clone anything.
+func TestIncreaseFailsWhenTemplateMissing(t *testing.T) {
+	log, _ := newLogBuffer(t)
+	ig := newRemovalTestGroup(t, removalTestServer{
+		log:     log,
+		members: []removalTestMember{{vmid: 100, name: "fleeting-running"}},
+	})
+
+	count, err := ig.Increase(context.Background(), 1)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "failed to find template")
+	require.Zero(t, count)
+}
+
+// A pool member listed without a name whose VM itself cannot be read is left alone and is
+// reported neither as removed (it is still running) nor as an attempt (nothing was asked of
+// it).
+func TestDecreaseSkipsInstanceWithUnreadableName(t *testing.T) {
+	log, logBuf := newLogBuffer(t)
+	counts := &removalRequestCounts{}
+	ig := newRemovalTestGroup(t, removalTestServer{
+		log:       log,
+		members:   []removalTestMember{{vmid: 100, name: ""}},
+		requests:  counts,
+		failPaths: []string{"/status/current"},
+	})
+
+	succeeded, err := ig.Decrease(context.Background(), []string{"100"})
+	require.NoError(t, err)
+	require.Empty(t, succeeded)
+	require.False(t, counts.requested(100, http.MethodPost, ""), "a VM whose name cannot be read must not be renamed: %v", counts.requestsFor(100))
+	require.Regexp(t, `\[WARN\].*cannot read the name of an instance to remove`, logBuf.String())
 }
