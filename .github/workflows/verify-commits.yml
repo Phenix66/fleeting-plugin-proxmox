@@ -1,0 +1,78 @@
+name: verify-commits
+
+on:
+  pull_request:
+    branches: [ "main" ]
+    types: [ "opened", "synchronize", "reopened" ]
+
+permissions:
+  contents: read
+  pull-requests: read
+
+jobs:
+  verify-commits:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - name: Verify PR commits are signed off and verified
+        run: |
+          set -euo pipefail
+
+          pr_number="${GITHUB_EVENT_NUMBER}"
+          commits="$(gh api --paginate "repos/${GITHUB_REPOSITORY}/pulls/${pr_number}/commits")"
+
+          # Returns success if the commit message contains a Signed-off-by line
+          # matching the author name exactly and the author email (case-insensitive).
+          signoff_ok() {
+            AUTHOR_NAME="$2" AUTHOR_EMAIL="$3" awk '
+              BEGIN {
+                want_name = ENVIRON["AUTHOR_NAME"]
+                want_email = tolower(ENVIRON["AUTHOR_EMAIL"])
+                found = 0
+              }
+              {
+                if ($0 !~ /^[ \t]*Signed-off-by:[ \t]/) next
+                s = $0
+                sub(/^[ \t]*Signed-off-by:[ \t]+/, "", s)
+                lt = index(s, "<")
+                gt = index(s, ">")
+                if (lt == 0 || gt == 0 || gt != length(s)) next
+                n = substr(s, 1, lt - 1)
+                sub(/[ \t]+$/, "", n)
+                e = tolower(substr(s, lt + 1, gt - lt - 1))
+                if (n == want_name && e == want_email) found = 1
+              }
+              END { exit found ? 0 : 1 }
+            ' <<<"$1"
+          }
+
+          failed=0
+          total=0
+          while IFS= read -r c; do
+            sha=$(jq -r '.sha' <<<"$c")
+            author_name=$(jq -r '.commit.author.name' <<<"$c")
+            author_email=$(jq -r '.commit.author.email' <<<"$c")
+            message=$(jq -r '.commit.message' <<<"$c")
+            verified=$(jq -r '.commit.verification.verified // .commit.signature.verified // false' <<<"$c")
+
+            total=$((total + 1))
+            problems=()
+            if [ "$verified" != "true" ]; then
+              problems+=("signature is not verified on GitHub")
+            fi
+            if ! signoff_ok "$message" "$author_name" "$author_email"; then
+              problems+=("missing 'Signed-off-by: ${author_name} <${author_email}>'")
+            fi
+            if [ "${#problems[@]}" -gt 0 ]; then
+              echo "::error::${sha}: ${problems[*]}"
+              failed=1
+            fi
+          done <<<"$(jq -c '.[]' <<<"$commits")"
+
+          if [ "$failed" -ne 0 ]; then
+            echo "::error::One or more commits are not signed off and verified."
+            exit 1
+          fi
+          echo "All ${total} commits are signed off and verified."
