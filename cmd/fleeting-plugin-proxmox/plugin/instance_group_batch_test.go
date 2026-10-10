@@ -8,9 +8,13 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+var (
+	errBatchTestFirst  = errors.New("first failure")
+	errBatchTestSecond = errors.New("second failure")
+)
+
 func TestBatchError(t *testing.T) {
-	errFirst := errors.New("first failure")
-	errSecond := errors.New("second failure")
+	t.Parallel()
 
 	testCases := []struct {
 		name    string
@@ -23,11 +27,11 @@ func TestBatchError(t *testing.T) {
 		},
 		{
 			name: "partial success is not an error",
-			errs: []error{nil, errFirst, nil, errSecond, nil},
+			errs: []error{nil, errBatchTestFirst, nil, errBatchTestSecond, nil},
 		},
 		{
 			name:    "all attempted failed",
-			errs:    []error{errFirst, errSecond},
+			errs:    []error{errBatchTestFirst, errBatchTestSecond},
 			wantErr: true,
 		},
 		{
@@ -39,6 +43,8 @@ func TestBatchError(t *testing.T) {
 
 	for _, testCase := range testCases {
 		t.Run(testCase.name, func(t *testing.T) {
+			t.Parallel()
+
 			err := ig.batchError("batch failed", testCase.errs)
 
 			if !testCase.wantErr {
@@ -56,20 +62,20 @@ func TestBatchError(t *testing.T) {
 }
 
 func TestRunParallel(t *testing.T) {
-	errFirst := errors.New("first failure")
+	t.Parallel()
 
 	errs := runParallel(3, func(index int) error {
 		if index == 1 {
-			return errFirst
+			return errBatchTestFirst
 		}
 
 		return nil
 	})
 
 	// Every call's error lands in its own slot, so a failure stays matched to its index.
-	require.Equal(t, []error{nil, errFirst, nil}, errs)
+	require.Equal(t, []error{nil, errBatchTestFirst, nil}, errs)
 
-	require.Empty(t, runParallel(0, func(int) error { return errFirst }))
+	require.Empty(t, runParallel(0, func(int) error { return errBatchTestFirst }))
 
 	// A panic in one call becomes that slot's error instead of taking the process down, and
 	// the other slots still complete.

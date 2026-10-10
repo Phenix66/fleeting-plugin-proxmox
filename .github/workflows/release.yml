@@ -35,7 +35,7 @@ jobs:
     steps:
       - uses: actions/setup-go@v6
         with:
-          go-version: '1.26.4'
+          go-version: '1.27.1'
       - uses: actions/checkout@v6
         with:
           fetch-depth: 0
@@ -63,7 +63,7 @@ jobs:
     steps:
       - uses: actions/setup-go@v6
         with:
-          go-version: '1.26.4'
+          go-version: '1.27.1'
       - run: go install gitlab.com/gitlab-org/fleeting/fleeting-artifact/cmd/fleeting-artifact@v0.0.0-20260629160204-1cce9dc42429
       - run: mkdir -p dist
       - uses: actions/download-artifact@v8

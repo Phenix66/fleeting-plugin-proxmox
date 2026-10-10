@@ -22,6 +22,8 @@ import (
 )
 
 func TestUnmarshallingPluginSettings(t *testing.T) {
+	t.Parallel()
+
 	settingsJSON := `{"url":"sample_url","template_id": 5,"instance_target_node":"pve-target"}`
 	instance := InstanceGroup{}
 
@@ -34,6 +36,8 @@ func TestUnmarshallingPluginSettings(t *testing.T) {
 }
 
 func TestShutdownIsIdempotent(t *testing.T) {
+	t.Parallel()
+
 	ig := &InstanceGroup{
 		collectorShutdownTrigger:              make(chan struct{}),
 		sessionTicketRefresherShutdownTrigger: make(chan struct{}),
@@ -48,7 +52,7 @@ func TestShutdownIsIdempotent(t *testing.T) {
 	})
 
 	// Shutdown must return every time, not just the first.
-	for i := range 3 {
+	for attempt := range 3 {
 		done := make(chan error, 1)
 
 		go func() {
@@ -59,12 +63,14 @@ func TestShutdownIsIdempotent(t *testing.T) {
 		case err := <-done:
 			require.NoError(t, err)
 		case <-time.After(time.Second):
-			t.Fatalf("Shutdown call #%d did not return: possible deadlock", i+1)
+			t.Fatalf("Shutdown call #%d did not return: possible deadlock", attempt+1)
 		}
 	}
 }
 
 func TestShutdownWithoutInitDoesNotPanic(t *testing.T) {
+	t.Parallel()
+
 	// A group whose Init never ran still has nil trigger channels, and closing a nil channel
 	// panics.
 	ig := &InstanceGroup{}
@@ -75,6 +81,8 @@ func TestShutdownWithoutInitDoesNotPanic(t *testing.T) {
 }
 
 func TestShutdownAfterInitCycleDoesNotHang(t *testing.T) {
+	t.Parallel()
+
 	ig := &InstanceGroup{}
 
 	// A Shutdown before the first Init has nothing to close, and resetLifecycle re-arms the
@@ -125,12 +133,16 @@ func startFakeWorkers(ig *InstanceGroup) {
 // for them. A batch in which every rename Decrease actually attempted failed is still a failed
 // batch, and a bystander must not report it as a success.
 func TestDecreaseReportsOnlyAttemptedSuccesses(t *testing.T) {
-	for _, bystander := range []string{"fleeting-removing", "other-running"} {
+	t.Parallel()
+
+	for _, bystander := range []string{DefaultInstanceNameRemoving, foreignRunning} {
 		t.Run(bystander, func(t *testing.T) {
+			t.Parallel()
+
 			counts := &removalRequestCounts{}
 			ig := newRemovalTestGroup(t, removalTestServer{
 				members: []removalTestMember{
-					{vmid: 100, name: "fleeting-running"},
+					{vmid: 100, name: DefaultInstanceNameRunning},
 					{vmid: 101, name: bystander},
 				},
 				requests: counts,
@@ -164,6 +176,30 @@ const (
 	// increaseTestTemplateTags are the tags the fake's template VM carries, so a deploy
 	// starts from a VM that already has tags.
 	increaseTestTemplateTags = "template-tag,manual-tag"
+
+	// foreignRunning is a name another manager uses for one of the fake's VMs.
+	foreignRunning = "other-running"
+
+	// increaseTestPool and increaseTestStorage are the pool and storage the fake serves.
+	increaseTestPool    = "test-pool"
+	increaseTestStorage = "local"
+
+	// increaseTestInvalidID is an instance id no VM carries, so the RPCs must refuse it.
+	increaseTestInvalidID = "not-a-vmid"
+
+	// increaseTestTemplate and increaseTestMemberTypeLXC name the bystanders Update must
+	// skip: the template itself and a pool member that is not a VM at all.
+	increaseTestTemplate      = "template"
+	increaseTestMemberTypeLXC = "lxc"
+
+	// increaseTestPools and increaseTestStatusCurrent are the routes a test can fail to make
+	// a pool or status fetch report an error.
+	increaseTestPools         = "/pools"
+	increaseTestStatusCurrent = "/status/current"
+
+	// increaseTestTagsCreating is the creating tags on a deploy that started from a tagged
+	// template.
+	increaseTestTagsCreating = "template-tag,manual-tag,fleeting-creating"
 )
 
 // increaseRequestCounts records the body of every config POST the fake served, per vmid, so a
@@ -184,7 +220,9 @@ func (c *increaseRequestCounts) configsFor(vmid int) []map[string]any {
 // increaseTestCloneVMIDs are the vmids /cluster/nextid hands out, in order. Increase
 // serialises the nextid/clone pair under its clone mutex, so the first of these is always the
 // one whose clone POST is refused and the second is always the one that deploys.
-var increaseTestCloneVMIDs = []int{100, 101}
+func increaseTestCloneVMIDs() []int {
+	return []int{100, 101}
+}
 
 // increaseTestUPID builds the UPID of a task of the given type against a vmid on the fake
 // node. Task.Ping reads the node, the type and the id back out of the UPID, so the tasks route
@@ -209,11 +247,11 @@ func newIncreaseTestGroup(t *testing.T, log hclog.Logger) (*InstanceGroup, *incr
 
 	counts := &increaseRequestCounts{byVMID: make(map[int][]map[string]any)}
 
-	poolMembers := []string{
-		fmt.Sprintf(`{"vmid":%d,"type":"qemu","name":"template","node":%q}`, increaseTestTemplateID, increaseTestNode),
-	}
+	poolMembers := make([]string, 0, 1+len(increaseTestCloneVMIDs()))
+	poolMembers = append(poolMembers,
+		fmt.Sprintf(`{"vmid":%d,"type":"qemu","name":"template","node":%q}`, increaseTestTemplateID, increaseTestNode))
 
-	for _, vmid := range increaseTestCloneVMIDs {
+	for _, vmid := range increaseTestCloneVMIDs() {
 		poolMembers = append(poolMembers,
 			fmt.Sprintf(`{"vmid":%d,"type":"qemu","name":"fleeting-creating","node":%q}`, vmid, increaseTestNode))
 	}
@@ -251,11 +289,12 @@ func newIncreaseTestGroup(t *testing.T, log hclog.Logger) (*InstanceGroup, *incr
 		constant(fmt.Sprintf(`{"data":{"tags":%q}}`, increaseTestTemplateTags)))
 	mux.HandleFunc("GET "+vmRoute("agent/get-osinfo"), constant(`{"data":{"result":{}}}`))
 
-	mux.HandleFunc("POST "+vmRoute("config"), func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("POST "+vmRoute("config"), func(writer http.ResponseWriter, r *http.Request) {
 		vmid := increaseTestVMID(t, r)
-
 		body := map[string]any{}
-		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+
+		err := json.NewDecoder(r.Body).Decode(&body)
+		if err != nil {
 			t.Errorf("config POST body: %v", err)
 		}
 
@@ -263,57 +302,62 @@ func newIncreaseTestGroup(t *testing.T, log hclog.Logger) (*InstanceGroup, *incr
 		counts.byVMID[vmid] = append(counts.byVMID[vmid], body)
 		counts.mu.Unlock()
 
-		fmt.Fprintf(w, `{"data":%q}`, increaseTestUPID("qmconfig", vmid))
+		fmt.Fprintf(writer, `{"data":%q}`, increaseTestUPID("qmconfig", vmid))
 	})
 
 	mux.HandleFunc("POST "+vmRoute("status/start"), func(w http.ResponseWriter, r *http.Request) {
 		fmt.Fprintf(w, `{"data":%q}`, increaseTestUPID("qmstart", increaseTestVMID(t, r)))
 	})
 
-	mux.HandleFunc("GET /cluster/nextid", func(w http.ResponseWriter, _ *http.Request) {
+	mux.HandleFunc("GET /cluster/nextid", func(writer http.ResponseWriter, _ *http.Request) {
+		vmids := increaseTestCloneVMIDs()
+
 		index := int(vmidsHandedOut.Add(1)) - 1
-		if index >= len(increaseTestCloneVMIDs) {
-			t.Errorf("fake was asked for more vmids than the %d it has", len(increaseTestCloneVMIDs))
-			http.Error(w, "out of vmids", http.StatusInternalServerError)
+		if index >= len(vmids) {
+			t.Errorf("fake was asked for more vmids than the %d it has", len(vmids))
+			http.Error(writer, "out of vmids", http.StatusInternalServerError)
 
 			return
 		}
 
-		fmt.Fprintf(w, `{"data":"%d"}`, increaseTestCloneVMIDs[index])
+		fmt.Fprintf(writer, `{"data":"%d"}`, vmids[index])
 	})
 
-	mux.HandleFunc("POST "+templateRoute("clone"), func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("POST "+templateRoute("clone"), func(writer http.ResponseWriter, r *http.Request) {
 		var cloneOptions proxmox.VirtualMachineCloneOptions
-		if err := json.NewDecoder(r.Body).Decode(&cloneOptions); err != nil {
+
+		err := json.NewDecoder(r.Body).Decode(&cloneOptions)
+		if err != nil {
 			t.Errorf("failed to decode clone options: %v", err)
-			http.Error(w, "undecodable clone options", http.StatusBadRequest)
+			http.Error(writer, "undecodable clone options", http.StatusBadRequest)
 
 			return
 		}
 
 		if clonesSeen.Add(1) == 1 {
-			http.Error(w, "clone refused", http.StatusInternalServerError)
+			http.Error(writer, "clone refused", http.StatusInternalServerError)
 
 			return
 		}
 
-		fmt.Fprintf(w, `{"data":%q}`, increaseTestUPID("qmclone", cloneOptions.NewID))
+		fmt.Fprintf(writer, `{"data":%q}`, increaseTestUPID("qmclone", cloneOptions.NewID))
 	})
 
 	// Every task the fake hands out succeeded; the batch's one failure is the refused clone,
 	// which never produced a task at all.
-	mux.HandleFunc("GET /nodes/"+increaseTestNode+"/tasks/", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("GET /nodes/"+increaseTestNode+"/tasks/", func(writer http.ResponseWriter, r *http.Request) {
 		upid := strings.TrimSuffix(strings.TrimPrefix(r.URL.Path, "/nodes/"+increaseTestNode+"/tasks/"), "/status")
 
 		fields := strings.Split(upid, ":")
 		if len(fields) < 8 {
 			t.Errorf("task route asked for a malformed UPID: %q", upid)
-			http.Error(w, "malformed upid", http.StatusBadRequest)
+			http.Error(writer, "malformed upid", http.StatusBadRequest)
 
 			return
 		}
 
-		fmt.Fprintf(w, `{"data":{"upid":%q,"node":%q,"type":%q,"id":%q,"user":"root@pam","status":%q,"exitstatus":%q}}`,
+		//nolint:gosec//G705 // test-only mock server: every argument is a fixture value, not user input
+		fmt.Fprintf(writer, `{"data":{"upid":%q,"node":%q,"type":%q,"id":%q,"user":"root@pam","status":%q,"exitstatus":%q}}`,
 			upid, increaseTestNode, fields[5], fields[6], taskStatusStopped, taskExitStatusOK)
 	})
 
@@ -323,13 +367,13 @@ func newIncreaseTestGroup(t *testing.T, log hclog.Logger) (*InstanceGroup, *incr
 	templateID := increaseTestTemplateID
 
 	ig := newWaitTestGroup()
-	ig.Pool = "test-pool"
-	ig.Storage = "local"
+	ig.Pool = increaseTestPool
+	ig.Storage = increaseTestStorage
 	ig.TemplateID = &templateID
-	ig.InstanceNameCreating = "fleeting-creating"
-	ig.InstanceNameRunning = "fleeting-running"
-	ig.InstanceTagsCreating = "fleeting-creating"
-	ig.InstanceTagsRunning = "fleeting-running"
+	ig.InstanceNameCreating = DefaultInstanceNameCreating
+	ig.InstanceNameRunning = DefaultInstanceNameRunning
+	ig.InstanceTagsCreating = DefaultInstanceNameCreating
+	ig.InstanceTagsRunning = DefaultInstanceNameRunning
 	ig.log = log
 	ig.proxmox = proxmox.NewClient(server.URL)
 
@@ -356,6 +400,8 @@ func increaseTestVMID(t *testing.T, r *http.Request) int {
 // provisioner stops asking; Update will no longer list it and it will be pruned on the next
 // cycle. It must not count toward batchError.
 func TestDecreaseOwnership(t *testing.T) {
+	t.Parallel()
+
 	type row struct {
 		name      string
 		members   []removalTestMember
@@ -364,8 +410,6 @@ func TestDecreaseOwnership(t *testing.T) {
 		wantWarn  bool
 		wantErr   error
 	}
-
-	const foreignRunning = "other-running"
 
 	rows := []row{
 		{
@@ -384,16 +428,16 @@ func TestDecreaseOwnership(t *testing.T) {
 		},
 		{
 			name:    "own fleeting-creating",
-			members: []removalTestMember{{vmid: 100, name: "fleeting-creating"}},
+			members: []removalTestMember{{vmid: 100, name: DefaultInstanceNameCreating}},
 		},
 		{
 			name:     "own fleeting-removing",
-			members:  []removalTestMember{{vmid: 100, name: "fleeting-removing"}},
+			members:  []removalTestMember{{vmid: 100, name: DefaultInstanceNameRemoving}},
 			wantSucc: []string{"100"},
 		},
 		{
 			name:      "own fleeting-running task fails",
-			members:   []removalTestMember{{vmid: 100, name: "fleeting-running"}},
+			members:   []removalTestMember{{vmid: 100, name: DefaultInstanceNameRunning}},
 			wantPOSTs: 1,
 			wantErr:   ErrTaskFailed,
 		},
@@ -401,21 +445,21 @@ func TestDecreaseOwnership(t *testing.T) {
 			// Pool lists under our name but the VM was renamed before we fetched it (lag
 			// window). The rename must be refused and the instance is not in succeeded.
 			name:    "lag: listed fleeting-running fetched other-running",
-			members: []removalTestMember{{vmid: 100, name: "fleeting-running", fetchedName: foreignRunning}},
+			members: []removalTestMember{{vmid: 100, name: DefaultInstanceNameRunning, fetchedName: foreignRunning}},
 			wantErr: ErrNotOwned,
 		},
 		{
 			// An earlier attempt's rename landed but the listing still trails it: the VM is
 			// already marked, so it is reported without a second rename.
 			name:     "lag: listed fleeting-running fetched fleeting-removing",
-			members:  []removalTestMember{{vmid: 100, name: "fleeting-running", fetchedName: "fleeting-removing"}},
+			members:  []removalTestMember{{vmid: 100, name: DefaultInstanceNameRunning, fetchedName: DefaultInstanceNameRemoving}},
 			wantSucc: []string{"100"},
 		},
 		{
 			// No name in the listing (Proxmox has no fresh status for the VM): the name on the
 			// VM decides, and our own running VM is still renamed.
 			name:      "unnamed listing, fetched fleeting-running",
-			members:   []removalTestMember{{vmid: 100, name: "", fetchedName: "fleeting-running"}},
+			members:   []removalTestMember{{vmid: 100, name: "", fetchedName: DefaultInstanceNameRunning}},
 			wantPOSTs: 1,
 			wantErr:   ErrTaskFailed,
 		},
@@ -427,30 +471,32 @@ func TestDecreaseOwnership(t *testing.T) {
 		},
 	}
 
-	for _, tc := range rows {
-		t.Run(tc.name, func(t *testing.T) {
+	for _, row := range rows {
+		t.Run(row.name, func(t *testing.T) {
+			t.Parallel()
+
 			log, logBuf := newLogBuffer(t)
 			counts := &removalRequestCounts{}
 			ig := newRemovalTestGroup(t, removalTestServer{
 				log:      log,
-				members:  tc.members,
+				members:  row.members,
 				requests: counts,
 			})
 
 			succeeded, err := ig.Decrease(context.Background(), []string{"100"})
 
-			if tc.wantErr != nil {
-				require.ErrorIs(t, err, tc.wantErr)
+			if row.wantErr != nil {
+				require.ErrorIs(t, err, row.wantErr)
 			} else {
 				require.NoError(t, err)
 			}
 
-			require.ElementsMatch(t, tc.wantSucc, succeeded)
+			require.ElementsMatch(t, row.wantSucc, succeeded)
 
-			require.Equal(t, tc.wantPOSTs, counts.configPOSTs.Load(), "config POST count")
+			require.Equal(t, row.wantPOSTs, counts.configPOSTs.Load(), "config POST count")
 
 			const warnPattern = `\[WARN\].*refusing to remove instance not owned by this group`
-			if tc.wantWarn {
+			if row.wantWarn {
 				require.Regexp(t, warnPattern, logBuf.String())
 			} else {
 				require.NotRegexp(t, warnPattern, logBuf.String())
@@ -465,36 +511,44 @@ func TestDecreaseOwnership(t *testing.T) {
 // API request at all; one listed under our name but fetched under a foreign one gets only the
 // fetch that revealed it.
 func TestRPCsRefuseForeignInstance(t *testing.T) {
+	t.Parallel()
+
 	members := []removalTestMember{
-		{vmid: 100, name: "fleeting-running"},
-		{vmid: 101, name: "other-running"},
-		{vmid: 102, name: "fleeting-running", fetchedName: "other-running"},
-		{vmid: 103, name: "", fetchedName: "fleeting-running"},
+		{vmid: 100, name: DefaultInstanceNameRunning},
+		{vmid: 101, name: foreignRunning},
+		{vmid: 102, name: DefaultInstanceNameRunning, fetchedName: foreignRunning},
+		{vmid: 103, name: "", fetchedName: DefaultInstanceNameRunning},
 	}
 
 	t.Run("ConnectInfo refusal", func(t *testing.T) {
+		t.Parallel()
+
 		counts := &removalRequestCounts{}
 		ig := newRemovalTestGroup(t, removalTestServer{members: members, requests: counts})
 
 		_, err := ig.ConnectInfo(context.Background(), "101")
 		require.ErrorIs(t, err, ErrNotOwned)
 		require.Contains(t, err.Error(), "failed to retrieve instance vmid='101'")
-		require.Contains(t, err.Error(), "other-running")
+		require.Contains(t, err.Error(), foreignRunning)
 		require.Empty(t, counts.requestsFor(101))
 	})
 
 	t.Run("Heartbeat refusal", func(t *testing.T) {
+		t.Parallel()
+
 		counts := &removalRequestCounts{}
 		ig := newRemovalTestGroup(t, removalTestServer{members: members, requests: counts})
 
 		err := ig.Heartbeat(context.Background(), "101")
 		require.ErrorIs(t, err, ErrNotOwned)
 		require.Contains(t, err.Error(), "failed to retrieve instance vmid='101'")
-		require.Contains(t, err.Error(), "other-running")
+		require.Contains(t, err.Error(), foreignRunning)
 		require.Empty(t, counts.requestsFor(101))
 	})
 
 	t.Run("Resume refusal", func(t *testing.T) {
+		t.Parallel()
+
 		counts := &removalRequestCounts{}
 		ig := newRemovalTestGroup(t, removalTestServer{members: members, requests: counts})
 
@@ -507,6 +561,8 @@ func TestRPCsRefuseForeignInstance(t *testing.T) {
 	})
 
 	t.Run("Suspend refusal", func(t *testing.T) {
+		t.Parallel()
+
 		counts := &removalRequestCounts{}
 		ig := newRemovalTestGroup(t, removalTestServer{members: members, requests: counts})
 
@@ -519,6 +575,8 @@ func TestRPCsRefuseForeignInstance(t *testing.T) {
 	})
 
 	t.Run("Heartbeat control", func(t *testing.T) {
+		t.Parallel()
+
 		counts := &removalRequestCounts{}
 		ig := newRemovalTestGroup(t, removalTestServer{members: members, requests: counts})
 
@@ -529,6 +587,8 @@ func TestRPCsRefuseForeignInstance(t *testing.T) {
 
 	// An unnamed listing is no evidence of a foreign VM: the fetched name decides.
 	t.Run("Heartbeat control: unnamed listing", func(t *testing.T) {
+		t.Parallel()
+
 		counts := &removalRequestCounts{}
 		ig := newRemovalTestGroup(t, removalTestServer{members: members, requests: counts})
 
@@ -560,12 +620,14 @@ func TestRPCsRefuseForeignInstance(t *testing.T) {
 		}},
 	}
 
-	for _, tc := range fetchedForeign {
-		t.Run(tc.name+" refusal: fetched name", func(t *testing.T) {
+	for _, testCase := range fetchedForeign {
+		t.Run(testCase.name+" refusal: fetched name", func(t *testing.T) {
+			t.Parallel()
+
 			counts := &removalRequestCounts{}
 			ig := newRemovalTestGroup(t, removalTestServer{members: members, requests: counts})
 
-			err := tc.call(ig)
+			err := testCase.call(ig)
 			require.Error(t, err)
 			require.Contains(t, err.Error(), "vmid='102' is named \"other-running\": not owned")
 
@@ -582,6 +644,8 @@ func TestRPCsRefuseForeignInstance(t *testing.T) {
 // instances at all. What the nil error hides goes to the log instead. This is the only test
 // that drives Increase at the RPC boundary.
 func TestIncreaseReportsPartialBatch(t *testing.T) {
+	t.Parallel()
+
 	log, logBuffer := newLogBuffer(t)
 	ig, _ := newIncreaseTestGroup(t, log)
 
@@ -596,6 +660,8 @@ func TestIncreaseReportsPartialBatch(t *testing.T) {
 // are added to them right after the clone, and the running tags replace the creating tags
 // once the instance is up.
 func TestIncreasePreservesTemplateTags(t *testing.T) {
+	t.Parallel()
+
 	log, _ := newLogBuffer(t)
 	ig, counts := newIncreaseTestGroup(t, log)
 
@@ -608,10 +674,10 @@ func TestIncreasePreservesTemplateTags(t *testing.T) {
 	deployed := counts.configsFor(101)
 	require.Len(t, deployed, 2)
 	require.Equal(t, map[string]any{
-		vmOptTags: "template-tag,manual-tag,fleeting-creating",
+		vmOptTags: increaseTestTagsCreating,
 	}, deployed[0])
 	require.Equal(t, map[string]any{
-		vmOptName: "fleeting-running",
+		vmOptName: DefaultInstanceNameRunning,
 		vmOptTags: "template-tag,manual-tag,fleeting-running",
 	}, deployed[1])
 }
@@ -620,14 +686,16 @@ func TestIncreasePreservesTemplateTags(t *testing.T) {
 // name maps to, and skips everything else: another manager's VM, the template, and pool
 // members that are not VMs at all.
 func TestUpdateReportsInstanceStates(t *testing.T) {
+	t.Parallel()
+
 	ig := newRemovalTestGroup(t, removalTestServer{
 		members: []removalTestMember{
-			{vmid: 100, name: "fleeting-creating"},
-			{vmid: 101, name: "fleeting-running"},
-			{vmid: 102, name: "fleeting-removing"},
-			{vmid: 103, name: "other-running"},
-			{vmid: 200, name: "template"},
-			{vmid: 300, name: "fleeting-running", memberType: "lxc"},
+			{vmid: 100, name: DefaultInstanceNameCreating},
+			{vmid: 101, name: DefaultInstanceNameRunning},
+			{vmid: 102, name: DefaultInstanceNameRemoving},
+			{vmid: 103, name: foreignRunning},
+			{vmid: 200, name: increaseTestTemplate},
+			{vmid: 300, name: DefaultInstanceNameRunning, memberType: increaseTestMemberTypeLXC},
 		},
 	})
 
@@ -650,7 +718,9 @@ func TestUpdateReportsInstanceStates(t *testing.T) {
 }
 
 func TestUpdatePoolFetchFailure(t *testing.T) {
-	ig := newRemovalTestGroup(t, removalTestServer{failPaths: []string{"/pools"}})
+	t.Parallel()
+
+	ig := newRemovalTestGroup(t, removalTestServer{failPaths: []string{increaseTestPools}})
 
 	err := ig.Update(context.Background(), func(string, provider.State) {})
 	require.Error(t, err)
@@ -658,9 +728,13 @@ func TestUpdatePoolFetchFailure(t *testing.T) {
 }
 
 func TestConnectInfo(t *testing.T) {
+	t.Parallel()
+
 	t.Run("returns the instance addresses", func(t *testing.T) {
+		t.Parallel()
+
 		ig := newRemovalTestGroup(t, removalTestServer{
-			members: []removalTestMember{{vmid: 100, name: "fleeting-running"}},
+			members: []removalTestMember{{vmid: 100, name: DefaultInstanceNameRunning}},
 		})
 		ig.InstanceNetworkProtocol = NetworkProtocolIPv4
 		connectorConfig := provider.ConnectorConfig{OS: "linux", Protocol: "ssh"}
@@ -675,10 +749,15 @@ func TestConnectInfo(t *testing.T) {
 	})
 
 	t.Run("prefers IPv6 under the any protocol", func(t *testing.T) {
-		ifaces := `{"name":"eth0","hardware-address":"12:34:56:AB:CD:EF","ip-addresses":[{"ip-address-type":"ipv4","ip-address":"192.168.0.1","prefix":24},{"ip-address-type":"ipv6","ip-address":"fd3b:47fc:de09::1","prefix":64},{"ip-address-type":"ipv6","ip-address":"2001:4860:4860::8888","prefix":128}]}`
+		t.Parallel()
+
+		ifaces := `{"name":"eth0","hardware-address":"12:34:56:AB:CD:EF",` +
+			`"ip-addresses":[{"ip-address-type":"ipv4","ip-address":"192.168.0.1","prefix":24},` +
+			`{"ip-address-type":"ipv6","ip-address":"fd3b:47fc:de09::1","prefix":64},` +
+			`{"ip-address-type":"ipv6","ip-address":"2001:4860:4860::8888","prefix":128}]}`
 
 		ig := newRemovalTestGroup(t, removalTestServer{
-			members: []removalTestMember{{vmid: 100, name: "fleeting-running", ifaces: ifaces}},
+			members: []removalTestMember{{vmid: 100, name: DefaultInstanceNameRunning, ifaces: ifaces}},
 		})
 		ig.InstanceNetworkProtocol = NetworkProtocolAny
 
@@ -689,9 +768,11 @@ func TestConnectInfo(t *testing.T) {
 	})
 
 	t.Run("refuses a non-numeric instance id", func(t *testing.T) {
+		t.Parallel()
+
 		ig := newRemovalTestGroup(t, removalTestServer{})
 
-		_, err := ig.ConnectInfo(context.Background(), "not-a-vmid")
+		_, err := ig.ConnectInfo(context.Background(), increaseTestInvalidID)
 		require.Error(t, err)
 		require.Contains(t, err.Error(), "failed to parse instance name")
 	})
@@ -699,6 +780,8 @@ func TestConnectInfo(t *testing.T) {
 	// A fetch that yields no usable address is retried, not failed: the agent can report
 	// before the interface has an address.
 	t.Run("retries until the addresses appear", func(t *testing.T) {
+		t.Parallel()
+
 		log, logBuf := newLogBuffer(t)
 		counts := &removalRequestCounts{}
 
@@ -707,7 +790,7 @@ func TestConnectInfo(t *testing.T) {
 		ig := newRemovalTestGroup(t, removalTestServer{
 			log: log,
 			members: []removalTestMember{
-				{vmid: 100, name: "fleeting-running"},
+				{vmid: 100, name: DefaultInstanceNameRunning},
 			},
 			networkIfaceBodies: []string{
 				`{"name":"eth0","hardware-address":"00:00:00:00:00:00","ip-addresses":[{"ip-address-type":"ipv4","ip-address":"192.168.0.1","prefix":24}]}`,
@@ -727,23 +810,30 @@ func TestConnectInfo(t *testing.T) {
 				fetches++
 			}
 		}
+
 		require.Equal(t, 2, fetches, "the first fetch must be retried: %v", counts.requestsFor(100))
 		require.Regexp(t, `\[ERROR\].*failed to get network interface.*retry=0`, logBuf.String())
 	})
 }
 
 func TestHeartbeat(t *testing.T) {
+	t.Parallel()
+
 	t.Run("refuses a non-numeric instance id", func(t *testing.T) {
+		t.Parallel()
+
 		ig := newRemovalTestGroup(t, removalTestServer{})
 
-		err := ig.Heartbeat(context.Background(), "not-a-vmid")
+		err := ig.Heartbeat(context.Background(), increaseTestInvalidID)
 		require.Error(t, err)
 		require.Contains(t, err.Error(), "invalid vm id")
 	})
 
 	t.Run("fails when the qemu agent is not answering", func(t *testing.T) {
+		t.Parallel()
+
 		ig := newRemovalTestGroup(t, removalTestServer{
-			members: []removalTestMember{{vmid: 100, name: "fleeting-running", osinfoFails: true}},
+			members: []removalTestMember{{vmid: 100, name: DefaultInstanceNameRunning, osinfoFails: true}},
 		})
 
 		err := ig.Heartbeat(context.Background(), "100")
@@ -756,6 +846,8 @@ func TestHeartbeat(t *testing.T) {
 // failed is an error, one in which something succeeded is not, and an unparseable id fails
 // its own slot without touching the others.
 func TestResumeAndSuspend(t *testing.T) {
+	t.Parallel()
+
 	operations := []struct {
 		name    string
 		call    func(ig *InstanceGroup, instances []string) ([]string, error)
@@ -782,12 +874,16 @@ func TestResumeAndSuspend(t *testing.T) {
 
 	for _, operation := range operations {
 		t.Run(operation.name, func(t *testing.T) {
+			t.Parallel()
+
 			t.Run("all instances succeed", func(t *testing.T) {
+				t.Parallel()
+
 				counts := &removalRequestCounts{}
 				ig := newRemovalTestGroup(t, removalTestServer{
 					members: []removalTestMember{
-						{vmid: 100, name: "fleeting-running"},
-						{vmid: 101, name: "fleeting-running"},
+						{vmid: 100, name: DefaultInstanceNameRunning},
+						{vmid: 101, name: DefaultInstanceNameRunning},
 					},
 					requests: counts,
 				})
@@ -800,19 +896,23 @@ func TestResumeAndSuspend(t *testing.T) {
 			})
 
 			t.Run("unparseable id fails its own slot", func(t *testing.T) {
+				t.Parallel()
+
 				ig := newRemovalTestGroup(t, removalTestServer{
-					members: []removalTestMember{{vmid: 100, name: "fleeting-running"}},
+					members: []removalTestMember{{vmid: 100, name: DefaultInstanceNameRunning}},
 				})
 
-				succeeded, err := operation.call(ig, []string{"100", "not-a-vmid"})
+				succeeded, err := operation.call(ig, []string{"100", increaseTestInvalidID})
 				require.ErrorIs(t, err, operation.wantErr)
 				require.Contains(t, err.Error(), "invalid vm id 'not-a-vmid'")
 				require.Equal(t, []string{"100"}, succeeded)
 			})
 
 			t.Run("refused rename target is not attempted", func(t *testing.T) {
+				t.Parallel()
+
 				ig := newRemovalTestGroup(t, removalTestServer{
-					members:   []removalTestMember{{vmid: 100, name: "fleeting-running"}},
+					members:   []removalTestMember{{vmid: 100, name: DefaultInstanceNameRunning}},
 					failPaths: []string{operation.route},
 				})
 
@@ -829,6 +929,8 @@ func TestResumeAndSuspend(t *testing.T) {
 // background workers; it reports the pool as the group id and the configured maximum as its
 // size. A stale instance whose rename fails must not stop the startup.
 func TestInitLifecycle(t *testing.T) {
+	t.Parallel()
+
 	log, _ := newLogBuffer(t)
 
 	tempDir := t.TempDir()
@@ -870,11 +972,13 @@ func TestInitLifecycle(t *testing.T) {
 
 // A pool member that is not in the removal list is not touched.
 func TestDecreaseIgnoresInstancesNotListedForRemoval(t *testing.T) {
+	t.Parallel()
+
 	counts := &removalRequestCounts{}
 	ig := newRemovalTestGroup(t, removalTestServer{
 		members: []removalTestMember{
-			{vmid: 100, name: "fleeting-running"},
-			{vmid: 101, name: "fleeting-running"},
+			{vmid: 100, name: DefaultInstanceNameRunning},
+			{vmid: 101, name: DefaultInstanceNameRunning},
 		},
 		requests: counts,
 	})
@@ -890,9 +994,13 @@ func TestDecreaseIgnoresInstancesNotListedForRemoval(t *testing.T) {
 // Init fails fast -- before it sleeps or starts any worker -- when it cannot build the
 // client or cannot list the pool for the stale sweep.
 func TestInitFailsFastWhenItCannotReachProxmox(t *testing.T) {
+	t.Parallel()
+
 	maxInstances := 7
 
 	t.Run("client cannot be built", func(t *testing.T) {
+		t.Parallel()
+
 		log, _ := newLogBuffer(t)
 		ig := newRemovalTestGroup(t, removalTestServer{log: log})
 		ig.CredentialsFilePath = path.Join(t.TempDir(), "does-not-exist.json")
@@ -906,13 +1014,15 @@ func TestInitFailsFastWhenItCannotReachProxmox(t *testing.T) {
 	})
 
 	t.Run("pool cannot be listed", func(t *testing.T) {
+		t.Parallel()
+
 		log, _ := newLogBuffer(t)
 
 		tempDir := t.TempDir()
 		credentialsPath := path.Join(tempDir, "credentials.json")
 		require.NoError(t, os.WriteFile(credentialsPath, []byte(`{"realm":"pve","username":"test","password":"secret"}`), 0o600))
 
-		ig := newRemovalTestGroup(t, removalTestServer{log: log, failPaths: []string{"/pools"}})
+		ig := newRemovalTestGroup(t, removalTestServer{log: log, failPaths: []string{increaseTestPools}})
 		ig.CredentialsFilePath = credentialsPath
 		ig.MaxInstances = &maxInstances
 
@@ -926,10 +1036,12 @@ func TestInitFailsFastWhenItCannotReachProxmox(t *testing.T) {
 
 // Increase with no template in the pool fails before it asks Proxmox to clone anything.
 func TestIncreaseFailsWhenTemplateMissing(t *testing.T) {
+	t.Parallel()
+
 	log, _ := newLogBuffer(t)
 	ig := newRemovalTestGroup(t, removalTestServer{
 		log:     log,
-		members: []removalTestMember{{vmid: 100, name: "fleeting-running"}},
+		members: []removalTestMember{{vmid: 100, name: DefaultInstanceNameRunning}},
 	})
 
 	count, err := ig.Increase(context.Background(), 1)
@@ -942,13 +1054,15 @@ func TestIncreaseFailsWhenTemplateMissing(t *testing.T) {
 // reported neither as removed (it is still running) nor as an attempt (nothing was asked of
 // it).
 func TestDecreaseSkipsInstanceWithUnreadableName(t *testing.T) {
+	t.Parallel()
+
 	log, logBuf := newLogBuffer(t)
 	counts := &removalRequestCounts{}
 	ig := newRemovalTestGroup(t, removalTestServer{
 		log:       log,
 		members:   []removalTestMember{{vmid: 100, name: ""}},
 		requests:  counts,
-		failPaths: []string{"/status/current"},
+		failPaths: []string{increaseTestStatusCurrent},
 	})
 
 	succeeded, err := ig.Decrease(context.Background(), []string{"100"})

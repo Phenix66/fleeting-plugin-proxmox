@@ -26,6 +26,7 @@ type IntegrationTestConfig struct {
 	UseExternalAddr bool                     `json:"use_external_addr"`
 }
 
+//nolint:paralleltest // subtests provision real VMs on a shared pool and must stay sequential
 func TestIntegration(t *testing.T) {
 	if *pluginBinaryPath == "" {
 		t.Skip("plugin binary path is missing, skipping")
@@ -48,6 +49,7 @@ func TestIntegration(t *testing.T) {
 		t.Errorf("failed to read config file: %v", err)
 	}
 
+	//nolint:paralleltest // subtests provision real VMs on a shared pool and must stay sequential
 	for _, config := range *configs {
 		t.Run(config.Name, func(t *testing.T) {
 			integration.TestProvisioning(

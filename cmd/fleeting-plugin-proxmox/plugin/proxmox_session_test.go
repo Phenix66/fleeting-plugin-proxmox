@@ -17,6 +17,8 @@ import (
 
 // The refresher loop returns once the shutdown trigger fires, so Shutdown cannot hang on it.
 func TestSessionTicketRefresherStopsOnShutdown(t *testing.T) {
+	t.Parallel()
+
 	ig := &InstanceGroup{
 		log:                                   hclog.NewNullLogger(),
 		sessionTicketRefresherShutdownTrigger: make(chan struct{}),
@@ -28,19 +30,23 @@ func TestSessionTicketRefresherStopsOnShutdown(t *testing.T) {
 }
 
 func TestRefreshSessionTicket(t *testing.T) {
+	t.Parallel()
+
 	t.Run("exchanges the credentials for a ticket", func(t *testing.T) {
+		t.Parallel()
+
 		var ticketRequested atomic.Bool
 
-		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			if r.Method == http.MethodPost && r.URL.Path == "/access/ticket" {
+		server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+			if request.Method == http.MethodPost && request.URL.Path == "/access/ticket" {
 				ticketRequested.Store(true)
 
-				fmt.Fprint(w, `{"data":{"ticket":"sample-ticket","userid":"test@pve","TTL":300}}`)
+				fmt.Fprint(writer, `{"data":{"ticket":"sample-ticket","userid":"test@pve","TTL":300}}`)
 
 				return
 			}
 
-			http.NotFound(w, r)
+			http.NotFound(writer, request)
 		}))
 		t.Cleanup(server.Close)
 
@@ -52,6 +58,8 @@ func TestRefreshSessionTicket(t *testing.T) {
 	})
 
 	t.Run("missing credentials file", func(t *testing.T) {
+		t.Parallel()
+
 		ig := newRefreshTestGroup(t, "http://127.0.0.1:1")
 		ig.CredentialsFilePath = path.Join(t.TempDir(), "does-not-exist.json")
 
@@ -61,6 +69,8 @@ func TestRefreshSessionTicket(t *testing.T) {
 	})
 
 	t.Run("refused ticket", func(t *testing.T) {
+		t.Parallel()
+
 		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 			http.Error(w, "authentication failed", http.StatusUnauthorized)
 		}))
@@ -83,8 +93,8 @@ func newRefreshTestGroup(t *testing.T, apiURL string) *InstanceGroup {
 	require.NoError(t, os.WriteFile(credentialsPath, []byte(`{"realm":"pve","username":"test","password":"secret"}`), 0o600))
 
 	return &InstanceGroup{
-		Settings: Settings{CredentialsFilePath: credentialsPath},
-		log:      hclog.NewNullLogger(),
-		proxmox:  proxmox.NewClient(apiURL),
+		CredentialsFilePath: credentialsPath,
+		log:                 hclog.NewNullLogger(),
+		proxmox:             proxmox.NewClient(apiURL),
 	}
 }

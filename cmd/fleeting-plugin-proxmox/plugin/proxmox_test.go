@@ -11,14 +11,24 @@ import (
 	"gitlab.com/gitlab-org/fleeting/fleeting/provider"
 )
 
+const (
+	proxmoxTestNode            = "pve-node"
+	proxmoxTestForeignRunning  = "other-running"
+	proxmoxTestForeignCreating = "other-creating"
+	proxmoxTestMemberTypeLXC   = "lxc"
+	proxmoxTestTemplate        = "template"
+	proxmoxTestPools           = "/pools"
+	proxmoxTestStatusCurrent   = "/status/current"
+)
+
 func TestInstanceGroup_getProxmoxClient(t *testing.T) {
+	t.Parallel()
+
 	tempDir := t.TempDir()
 	ig := InstanceGroup{
-		Settings: Settings{
-			URL:                   "https://example.com/proxmox",
-			InsecureSkipTLSVerify: false,
-			CredentialsFilePath:   path.Join(tempDir, "prox_credentials.json"),
-		},
+		URL:                   "https://example.com/proxmox",
+		InsecureSkipTLSVerify: false,
+		CredentialsFilePath:   path.Join(tempDir, "prox_credentials.json"),
 	}
 
 	err := os.WriteFile(
@@ -33,10 +43,7 @@ func TestInstanceGroup_getProxmoxClient(t *testing.T) {
 }
 
 func TestOwnedInstance(t *testing.T) {
-	const (
-		foreignListed  = "other-running"
-		foreignFetched = "other-creating"
-	)
+	t.Parallel()
 
 	tests := []struct {
 		name        string
@@ -50,22 +57,22 @@ func TestOwnedInstance(t *testing.T) {
 		{
 			name:      "own creating",
 			vmid:      100,
-			members:   []removalTestMember{{vmid: 100, name: "fleeting-creating"}},
-			wantName:  "fleeting-creating",
+			members:   []removalTestMember{{vmid: 100, name: DefaultInstanceNameCreating}},
+			wantName:  DefaultInstanceNameCreating,
 			wantFetch: true,
 		},
 		{
 			name:      "own running",
 			vmid:      100,
-			members:   []removalTestMember{{vmid: 100, name: "fleeting-running"}},
-			wantName:  "fleeting-running",
+			members:   []removalTestMember{{vmid: 100, name: DefaultInstanceNameRunning}},
+			wantName:  DefaultInstanceNameRunning,
 			wantFetch: true,
 		},
 		{
 			name:      "own removing",
 			vmid:      100,
-			members:   []removalTestMember{{vmid: 100, name: "fleeting-removing"}},
-			wantName:  "fleeting-removing",
+			members:   []removalTestMember{{vmid: 100, name: DefaultInstanceNameRemoving}},
+			wantName:  DefaultInstanceNameRemoving,
 			wantFetch: true,
 		},
 		{
@@ -73,21 +80,21 @@ func TestOwnedInstance(t *testing.T) {
 			// (our own rename the listing has not caught up with) is still ours.
 			name:      "own listed other own fetched",
 			vmid:      100,
-			members:   []removalTestMember{{vmid: 100, name: "fleeting-running", fetchedName: "fleeting-removing"}},
-			wantName:  "fleeting-removing",
+			members:   []removalTestMember{{vmid: 100, name: DefaultInstanceNameRunning, fetchedName: DefaultInstanceNameRemoving}},
+			wantName:  DefaultInstanceNameRemoving,
 			wantFetch: true,
 		},
 		{
 			name:        "foreign listed",
 			vmid:        100,
-			members:     []removalTestMember{{vmid: 100, name: foreignListed}},
+			members:     []removalTestMember{{vmid: 100, name: proxmoxTestForeignRunning}},
 			wantErr:     ErrNotOwned,
 			wantMsgPart: `vmid='100' is named "other-running"`,
 		},
 		{
 			name:        "own listed foreign fetched",
 			vmid:        100,
-			members:     []removalTestMember{{vmid: 100, name: "fleeting-running", fetchedName: foreignFetched}},
+			members:     []removalTestMember{{vmid: 100, name: DefaultInstanceNameRunning, fetchedName: proxmoxTestForeignCreating}},
 			wantErr:     ErrNotOwned,
 			wantMsgPart: `vmid='100' is named "other-creating"`,
 			wantFetch:   true,
@@ -97,14 +104,14 @@ func TestOwnedInstance(t *testing.T) {
 			// either way: the fetched name decides.
 			name:      "unnamed listing own fetched",
 			vmid:      100,
-			members:   []removalTestMember{{vmid: 100, name: "", fetchedName: "fleeting-running"}},
-			wantName:  "fleeting-running",
+			members:   []removalTestMember{{vmid: 100, name: "", fetchedName: DefaultInstanceNameRunning}},
+			wantName:  DefaultInstanceNameRunning,
 			wantFetch: true,
 		},
 		{
 			name:        "unnamed listing foreign fetched",
 			vmid:        100,
-			members:     []removalTestMember{{vmid: 100, name: "", fetchedName: foreignFetched}},
+			members:     []removalTestMember{{vmid: 100, name: "", fetchedName: proxmoxTestForeignCreating}},
 			wantErr:     ErrNotOwned,
 			wantMsgPart: `vmid='100' is named "other-creating"`,
 			wantFetch:   true,
@@ -112,56 +119,61 @@ func TestOwnedInstance(t *testing.T) {
 		{
 			name:        "absent from pool",
 			vmid:        999,
-			members:     []removalTestMember{{vmid: 100, name: "fleeting-creating"}},
+			members:     []removalTestMember{{vmid: 100, name: DefaultInstanceNameCreating}},
 			wantErr:     ErrNotFound,
 			wantMsgPart: "not found",
 		},
 	}
 
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
+	for _, testCase := range tests {
+		t.Run(testCase.name, func(t *testing.T) {
+			t.Parallel()
+
 			counts := &removalRequestCounts{}
 			ig := newRemovalTestGroup(t, removalTestServer{
-				members:  tt.members,
+				members:  testCase.members,
 				requests: counts,
 			})
 
-			vm, err := ig.ownedInstance(context.Background(), int(tt.vmid))
+			//nolint:gosec//G115 // testCase.vmid is a Proxmox VMID, which always fits in an int
+			vm, err := ig.ownedInstance(context.Background(), int(testCase.vmid))
 
-			require.Equal(t, tt.wantFetch, len(counts.requestsFor(tt.vmid)) > 0, "requests: %v", counts.requestsFor(tt.vmid))
+			require.Equal(t, testCase.wantFetch, len(counts.requestsFor(testCase.vmid)) > 0, "requests: %v", counts.requestsFor(testCase.vmid))
 
-			if tt.wantErr != nil {
-				require.ErrorIs(t, err, tt.wantErr)
+			if testCase.wantErr != nil {
+				require.ErrorIs(t, err, testCase.wantErr)
 				require.Nil(t, vm)
-				require.Contains(t, err.Error(), tt.wantMsgPart)
+				require.Contains(t, err.Error(), testCase.wantMsgPart)
 
 				return
 			}
 
 			require.NoError(t, err)
-			require.Equal(t, tt.wantName, fetchedName(vm))
+			require.Equal(t, testCase.wantName, fetchedName(vm))
 		})
 	}
 }
 
 func TestStateForName(t *testing.T) {
-	ig := &InstanceGroup{Settings: Settings{
-		InstanceNameCreating: "fleeting-creating",
-		InstanceNameRunning:  "fleeting-running",
-		InstanceNameRemoving: "fleeting-removing",
-	}}
+	t.Parallel()
+
+	ig := &InstanceGroup{
+		InstanceNameCreating: DefaultInstanceNameCreating,
+		InstanceNameRunning:  DefaultInstanceNameRunning,
+		InstanceNameRemoving: DefaultInstanceNameRemoving,
+	}
 
 	for name, want := range map[string]provider.State{
-		"fleeting-creating": provider.StateCreating,
-		"fleeting-running":  provider.StateRunning,
-		"fleeting-removing": provider.StateDeleting,
+		DefaultInstanceNameCreating: provider.StateCreating,
+		DefaultInstanceNameRunning:  provider.StateRunning,
+		DefaultInstanceNameRemoving: provider.StateDeleting,
 	} {
 		state, ok := ig.stateForName(name)
 		require.True(t, ok, name)
 		require.Equal(t, want, state, name)
 	}
 
-	for _, name := range []string{"other-running", "template", ""} {
+	for _, name := range []string{proxmoxTestForeignRunning, proxmoxTestTemplate, ""} {
 		_, ok := ig.stateForName(name)
 		require.False(t, ok, "%q must not be one of this group's names", name)
 	}
@@ -170,13 +182,15 @@ func TestStateForName(t *testing.T) {
 // getListedVM must refuse a member listed under a foreign name before any request to its node,
 // whatever its caller selected it by.
 func TestGetListedVMRefusesForeignListing(t *testing.T) {
+	t.Parallel()
+
 	counts := &removalRequestCounts{}
 	ig := newRemovalTestGroup(t, removalTestServer{
-		members:  []removalTestMember{{vmid: 100, name: "other-running"}},
+		members:  []removalTestMember{{vmid: 100, name: proxmoxTestForeignRunning}},
 		requests: counts,
 	})
 
-	member := &proxmox.ClusterResource{VMID: 100, Type: vmTypeQEMU, Name: "other-running", Node: "pve-node"}
+	member := &proxmox.ClusterResource{VMID: 100, Type: vmTypeQEMU, Name: proxmoxTestForeignRunning, Node: proxmoxTestNode}
 
 	vm, err := ig.getListedVM(context.Background(), member)
 	require.ErrorIs(t, err, ErrNotOwned)
@@ -187,8 +201,10 @@ func TestGetListedVMRefusesForeignListing(t *testing.T) {
 // TestGetProxmoxVMIgnoresName guards the regression: getProxmoxVM must resolve any pool member regardless
 // of its name, because Increase uses it to fetch the template and deployInstance the VM it has just cloned.
 func TestGetProxmoxVMIgnoresName(t *testing.T) {
+	t.Parallel()
+
 	ig := newRemovalTestGroup(t, removalTestServer{
-		members: []removalTestMember{{vmid: 200, name: "template"}},
+		members: []removalTestMember{{vmid: 200, name: proxmoxTestTemplate}},
 	})
 
 	vm, err := ig.getProxmoxVM(context.Background(), 200)
@@ -197,11 +213,11 @@ func TestGetProxmoxVMIgnoresName(t *testing.T) {
 }
 
 func TestInstanceGroup_getProxmoxCredentials(t *testing.T) {
+	t.Parallel()
+
 	tempDir := t.TempDir()
 	ig := InstanceGroup{
-		Settings: Settings{
-			CredentialsFilePath: path.Join(tempDir, "sample_credentials.json"),
-		},
+		CredentialsFilePath: path.Join(tempDir, "sample_credentials.json"),
 	}
 
 	// Missing credentials file
@@ -235,17 +251,19 @@ func TestInstanceGroup_getProxmoxCredentials(t *testing.T) {
 }
 
 func TestInstanceGroup_getProxmoxClientErrors(t *testing.T) {
+	t.Parallel()
+
 	tempDir := t.TempDir()
 	credentialsPath := path.Join(tempDir, "credentials.json")
 
 	require.NoError(t, os.WriteFile(credentialsPath, []byte(`{"realm": "pve","username": "test","password": "secret"}`), 0o600))
 
 	t.Run("unparseable URL", func(t *testing.T) {
+		t.Parallel()
+
 		ig := InstanceGroup{
-			Settings: Settings{
-				URL:                 "http://exa mple.com",
-				CredentialsFilePath: credentialsPath,
-			},
+			URL:                 "http://exa mple.com",
+			CredentialsFilePath: credentialsPath,
 		}
 
 		_, err := ig.getProxmoxClient()
@@ -254,11 +272,11 @@ func TestInstanceGroup_getProxmoxClientErrors(t *testing.T) {
 	})
 
 	t.Run("missing credentials file", func(t *testing.T) {
+		t.Parallel()
+
 		ig := InstanceGroup{
-			Settings: Settings{
-				URL:                 "https://example.com",
-				CredentialsFilePath: path.Join(tempDir, "does-not-exist.json"),
-			},
+			URL:                 "https://example.com",
+			CredentialsFilePath: path.Join(tempDir, "does-not-exist.json"),
 		}
 
 		_, err := ig.getProxmoxClient()
@@ -268,8 +286,10 @@ func TestInstanceGroup_getProxmoxClientErrors(t *testing.T) {
 }
 
 func TestGetProxmoxVMAbsentFromPool(t *testing.T) {
+	t.Parallel()
+
 	ig := newRemovalTestGroup(t, removalTestServer{
-		members: []removalTestMember{{vmid: 100, name: "fleeting-running"}},
+		members: []removalTestMember{{vmid: 100, name: DefaultInstanceNameRunning}},
 	})
 
 	vm, err := ig.getProxmoxVM(context.Background(), 999)
@@ -278,7 +298,9 @@ func TestGetProxmoxVMAbsentFromPool(t *testing.T) {
 }
 
 func TestGetProxmoxVMPoolFetchFailure(t *testing.T) {
-	ig := newRemovalTestGroup(t, removalTestServer{failPaths: []string{"/pools"}})
+	t.Parallel()
+
+	ig := newRemovalTestGroup(t, removalTestServer{failPaths: []string{proxmoxTestPools}})
 
 	vm, err := ig.getProxmoxVM(context.Background(), 100)
 	require.Error(t, err)
@@ -289,8 +311,10 @@ func TestGetProxmoxVMPoolFetchFailure(t *testing.T) {
 // findPoolMember only looks at VM pool members: a container that happens to hold the vmid is
 // not the VM.
 func TestFindPoolMemberIgnoresNonQEMUMembers(t *testing.T) {
+	t.Parallel()
+
 	ig := newRemovalTestGroup(t, removalTestServer{
-		members: []removalTestMember{{vmid: 100, name: "fleeting-running", memberType: "lxc"}},
+		members: []removalTestMember{{vmid: 100, name: DefaultInstanceNameRunning, memberType: proxmoxTestMemberTypeLXC}},
 	})
 
 	member, err := ig.findPoolMember(context.Background(), 100)
@@ -299,19 +323,25 @@ func TestFindPoolMemberIgnoresNonQEMUMembers(t *testing.T) {
 }
 
 func TestGetProxmoxVMOnNodeErrors(t *testing.T) {
+	t.Parallel()
+
 	t.Run("node fetch fails", func(t *testing.T) {
+		t.Parallel()
+
 		ig := newRemovalTestGroup(t, removalTestServer{failPaths: []string{"/nodes/pve-node/status"}})
 
-		vm, err := ig.getProxmoxVMOnNode(context.Background(), 100, "pve-node")
+		vm, err := ig.getProxmoxVMOnNode(context.Background(), 100, proxmoxTestNode)
 		require.Error(t, err)
 		require.Nil(t, vm)
 		require.Contains(t, err.Error(), "failed to get node")
 	})
 
 	t.Run("vm fetch fails", func(t *testing.T) {
-		ig := newRemovalTestGroup(t, removalTestServer{failPaths: []string{"/status/current"}})
+		t.Parallel()
 
-		vm, err := ig.getProxmoxVMOnNode(context.Background(), 100, "pve-node")
+		ig := newRemovalTestGroup(t, removalTestServer{failPaths: []string{proxmoxTestStatusCurrent}})
+
+		vm, err := ig.getProxmoxVMOnNode(context.Background(), 100, proxmoxTestNode)
 		require.Error(t, err)
 		require.Nil(t, vm)
 		require.Contains(t, err.Error(), "failed to get vm")
@@ -321,9 +351,11 @@ func TestGetProxmoxVMOnNodeErrors(t *testing.T) {
 // ownedInstance and getListedVM surface a failed fetch as an error rather than acting on a
 // half-read VM.
 func TestOwnedInstanceFetchFailure(t *testing.T) {
+	t.Parallel()
+
 	ig := newRemovalTestGroup(t, removalTestServer{
-		members:   []removalTestMember{{vmid: 100, name: "fleeting-running"}},
-		failPaths: []string{"/status/current"},
+		members:   []removalTestMember{{vmid: 100, name: DefaultInstanceNameRunning}},
+		failPaths: []string{proxmoxTestStatusCurrent},
 	})
 
 	vm, err := ig.ownedInstance(context.Background(), 100)
@@ -333,9 +365,11 @@ func TestOwnedInstanceFetchFailure(t *testing.T) {
 }
 
 func TestGetListedVMAccessFailure(t *testing.T) {
-	ig := newRemovalTestGroup(t, removalTestServer{failPaths: []string{"/status/current"}})
+	t.Parallel()
 
-	member := &proxmox.ClusterResource{VMID: 100, Type: vmTypeQEMU, Name: "fleeting-removing", Node: "pve-node"}
+	ig := newRemovalTestGroup(t, removalTestServer{failPaths: []string{proxmoxTestStatusCurrent}})
+
+	member := &proxmox.ClusterResource{VMID: 100, Type: vmTypeQEMU, Name: DefaultInstanceNameRemoving, Node: proxmoxTestNode}
 
 	vm, err := ig.getListedVM(context.Background(), member)
 	require.Error(t, err)

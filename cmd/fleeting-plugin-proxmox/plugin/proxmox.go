@@ -46,6 +46,7 @@ func (ig *InstanceGroup) findPoolMember(ctx context.Context, vmid int) (proxmox.
 			continue
 		}
 
+		//nolint:gosec//G115 // vmid is a Proxmox VMID, which always fits in an int
 		if member.VMID == uint64(vmid) {
 			return member, nil
 		}
@@ -117,6 +118,7 @@ func (ig *InstanceGroup) isOwnName(name string) bool {
 // has not reported for five minutes (pvestatd stalled, pmxcfs just restarted). An empty name
 // says nothing about who owns the VM; the name on the VM itself does.
 func (ig *InstanceGroup) nameFromNode(ctx context.Context, member *proxmox.ClusterResource) error {
+	//nolint:gosec//G115 // member.VMID is a Proxmox VMID, which always fits in an int
 	vm, err := ig.getProxmoxVMOnNode(ctx, int(member.VMID), member.Node)
 	if err != nil {
 		return err
@@ -162,6 +164,7 @@ func (ig *InstanceGroup) getListedVM(ctx context.Context, member *proxmox.Cluste
 		return nil, notOwned(member.VMID, member.Name)
 	}
 
+	//nolint:gosec//G115 // member.VMID is a Proxmox VMID, which always fits in an int
 	vm, err := ig.getProxmoxVMOnNode(ctx, int(member.VMID), member.Node)
 	if err != nil {
 		return nil, err

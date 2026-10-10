@@ -324,5 +324,6 @@ func (ig *InstanceGroup) markInstancesForRemoval(ctx context.Context, instances 
 }
 
 func (ig *InstanceGroup) isProxmoxResourceAnInstance(member proxmox.ClusterResource) bool {
+	//nolint:gosec//G115 // TemplateID is a Proxmox VMID, which always fits in an int
 	return member.Type == vmTypeQEMU && member.VMID != uint64(*ig.TemplateID)
 }

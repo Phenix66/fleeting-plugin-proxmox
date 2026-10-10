@@ -345,18 +345,21 @@ func (ig *InstanceGroup) Resume(ctx context.Context, instances []string) ([]stri
 		vmid, err := strconv.Atoi(instance)
 		if err != nil {
 			errs = append(errs, fmt.Sprintf("invalid vm id '%s'", instance))
+
 			continue
 		}
 
 		vm, err := ig.ownedInstance(ctx, vmid)
 		if err != nil {
 			errs = append(errs, fmt.Sprintf("vm id '%d': %v", vmid, err))
+
 			continue
 		}
 
 		_, err = vm.Resume(ctx)
 		if err != nil {
 			errs = append(errs, fmt.Sprintf("resume api call failed for vm id '%d'", vmid))
+
 			continue
 		}
 
@@ -379,18 +382,21 @@ func (ig *InstanceGroup) Suspend(ctx context.Context, instances []string) ([]str
 		vmid, err := strconv.Atoi(instance)
 		if err != nil {
 			errs = append(errs, fmt.Sprintf("invalid vm id '%s'", instance))
+
 			continue
 		}
 
 		vm, err := ig.ownedInstance(ctx, vmid)
 		if err != nil {
 			errs = append(errs, fmt.Sprintf("vm id '%d': %v", vmid, err))
+
 			continue
 		}
 
 		_, err = vm.Pause(ctx)
 		if err != nil {
 			errs = append(errs, fmt.Sprintf("pause api call failed for vm id '%d'", vmid))
+
 			continue
 		}
 

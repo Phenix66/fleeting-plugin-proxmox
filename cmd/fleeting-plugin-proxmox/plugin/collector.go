@@ -93,6 +93,7 @@ func (ig *InstanceGroup) collectInstance(ctx context.Context, member proxmox.Clu
 
 		if err != nil {
 			ig.log.Error("collector failed to stop instance", "vmid", member.VMID, "err", err)
+
 			return
 		}
 

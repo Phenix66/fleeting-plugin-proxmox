@@ -17,15 +17,21 @@ import (
 )
 
 const (
-	deployTestNode       = "pve-node"
-	deployTestTemplateID = 200
-	deployTestCloneVMID  = 100
+	deployTestNode               = "pve-node"
+	deployTestTemplateID         = 200
+	deployTestCloneVMID          = 100
+	deployTestPool               = "test-pool"
+	deployTestStorage            = "local"
+	deployTestFailStepAutoresize = "autoresize"
+	deployTestAutoresizeSize     = "10G"
+	deployTestAutoresizeDisk     = "scsi1"
+	deployTestTagsCreating       = "template-tag,fleeting-creating"
 )
 
 // deployTestOptions parameterises newDeployTestGroup.
 type deployTestOptions struct {
 	// failStep names the deploy step the fake makes fail: "clone" (the clone POST is
-	// refused), "clone-task" (the clone task reports a failure), "autoresize" (the resize
+	// refused), "clone-task" (the clone task reports a failure), deployTestFailStepAutoresize (the resize
 	// PUT is refused), "start" (the start POST is refused) or "agent" (the agent never
 	// answers). Empty means every step succeeds.
 	failStep string
@@ -91,7 +97,7 @@ func newDeployTestGroup(t *testing.T, log hclog.Logger, opts deployTestOptions) 
 		fmt.Sprintf(`{"vmid":%d,"type":"qemu","name":"fleeting-creating","node":%q}`, deployTestCloneVMID, deployTestNode))
 
 	constant := func(body string) http.HandlerFunc {
-		return func(w http.ResponseWriter, _ *http.Request) { fmt.Fprint(w, body) }
+		return func(writer http.ResponseWriter, _ *http.Request) { fmt.Fprint(writer, body) }
 	}
 
 	vmRoute := func(suffix string) string {
@@ -102,11 +108,13 @@ func newDeployTestGroup(t *testing.T, log hclog.Logger, opts deployTestOptions) 
 		return fmt.Sprintf("/nodes/%s/qemu/%d/%s", deployTestNode, deployTestTemplateID, suffix)
 	}
 
-	decodeBody := func(t *testing.T, r *http.Request) map[string]any {
+	decodeBody := func(t *testing.T, request *http.Request) map[string]any {
 		t.Helper()
 
 		body := map[string]any{}
-		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+
+		err := json.NewDecoder(request.Body).Decode(&body)
+		if err != nil {
 			t.Errorf("request body: %v", err)
 		}
 
@@ -129,78 +137,78 @@ func newDeployTestGroup(t *testing.T, log hclog.Logger, opts deployTestOptions) 
 
 	mux.HandleFunc("GET "+vmRoute("config"), constant(`{"data":{"tags":"template-tag"}}`))
 
-	mux.HandleFunc("POST "+vmRoute("config"), func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("POST "+vmRoute("config"), func(writer http.ResponseWriter, request *http.Request) {
 		call := int(opts.configCalls.Add(1)) - 1
 		if opts.configFailOnCall != nil && call == *opts.configFailOnCall {
-			http.Error(w, "config refused", http.StatusInternalServerError)
+			http.Error(writer, "config refused", http.StatusInternalServerError)
 
 			return
 		}
 
 		counts.mu.Lock()
-		counts.configs = append(counts.configs, decodeBody(t, r))
+		counts.configs = append(counts.configs, decodeBody(t, request))
 		counts.mu.Unlock()
 
-		fmt.Fprintf(w, `{"data":%q}`, increaseTestUPID("qmconfig", deployTestCloneVMID))
+		fmt.Fprintf(writer, `{"data":%q}`, increaseTestUPID("qmconfig", deployTestCloneVMID))
 	})
 
-	mux.HandleFunc("PUT "+vmRoute("resize"), func(w http.ResponseWriter, r *http.Request) {
-		if opts.failStep == "autoresize" {
-			http.Error(w, "resize refused", http.StatusInternalServerError)
+	mux.HandleFunc("PUT "+vmRoute("resize"), func(writer http.ResponseWriter, request *http.Request) {
+		if opts.failStep == deployTestFailStepAutoresize {
+			http.Error(writer, "resize refused", http.StatusInternalServerError)
 
 			return
 		}
 
 		counts.mu.Lock()
-		counts.resizes = append(counts.resizes, decodeBody(t, r))
+		counts.resizes = append(counts.resizes, decodeBody(t, request))
 		counts.mu.Unlock()
 
-		fmt.Fprintf(w, `{"data":%q}`, increaseTestUPID("qmresize", deployTestCloneVMID))
+		fmt.Fprintf(writer, `{"data":%q}`, increaseTestUPID("qmresize", deployTestCloneVMID))
 	})
 
-	mux.HandleFunc("POST "+templateRoute("clone"), func(w http.ResponseWriter, _ *http.Request) {
+	mux.HandleFunc("POST "+templateRoute("clone"), func(writer http.ResponseWriter, _ *http.Request) {
 		if opts.failStep == "clone" {
-			http.Error(w, "clone refused", http.StatusInternalServerError)
+			http.Error(writer, "clone refused", http.StatusInternalServerError)
 
 			return
 		}
 
-		fmt.Fprintf(w, `{"data":%q}`, increaseTestUPID("qmclone", deployTestCloneVMID))
+		fmt.Fprintf(writer, `{"data":%q}`, increaseTestUPID("qmclone", deployTestCloneVMID))
 	})
 
-	mux.HandleFunc("POST "+vmRoute("status/start"), func(w http.ResponseWriter, _ *http.Request) {
+	mux.HandleFunc("POST "+vmRoute("status/start"), func(writer http.ResponseWriter, _ *http.Request) {
 		if opts.failStep == "start" {
-			http.Error(w, "start refused", http.StatusInternalServerError)
+			http.Error(writer, "start refused", http.StatusInternalServerError)
 
 			return
 		}
 
-		fmt.Fprintf(w, `{"data":%q}`, increaseTestUPID("qmstart", deployTestCloneVMID))
+		fmt.Fprintf(writer, `{"data":%q}`, increaseTestUPID("qmstart", deployTestCloneVMID))
 	})
 
-	mux.HandleFunc("GET "+vmRoute("agent/get-osinfo"), func(w http.ResponseWriter, _ *http.Request) {
+	mux.HandleFunc("GET "+vmRoute("agent/get-osinfo"), func(writer http.ResponseWriter, _ *http.Request) {
 		if opts.failStep == "agent" {
-			http.Error(w, "agent unavailable", http.StatusInternalServerError)
+			http.Error(writer, "agent unavailable", http.StatusInternalServerError)
 
 			return
 		}
 
-		fmt.Fprint(w, `{"data":{"result":{}}}`)
+		fmt.Fprint(writer, `{"data":{"result":{}}}`)
 	})
 
-	mux.HandleFunc("GET /nodes/"+deployTestNode+"/tasks/", func(w http.ResponseWriter, r *http.Request) {
-		if strings.HasSuffix(r.URL.Path, "/log") {
-			fmt.Fprint(w, `{"data":[]}`)
+	mux.HandleFunc("GET /nodes/"+deployTestNode+"/tasks/", func(writer http.ResponseWriter, request *http.Request) {
+		if strings.HasSuffix(request.URL.Path, "/log") {
+			fmt.Fprint(writer, `{"data":[]}`)
 
 			return
 		}
 
-		upid := strings.TrimSuffix(strings.TrimPrefix(r.URL.Path, "/nodes/"+deployTestNode+"/tasks/"), "/status")
+		upid := strings.TrimSuffix(strings.TrimPrefix(request.URL.Path, "/nodes/"+deployTestNode+"/tasks/"), "/status")
 
 		fields := strings.Split(upid, ":")
 		if len(fields) < 8 {
 			t.Errorf("task route asked for a malformed UPID: %q", upid)
-			http.Error(w, "malformed upid", http.StatusBadRequest)
+			http.Error(writer, "malformed upid", http.StatusBadRequest)
 
 			return
 		}
@@ -210,7 +218,8 @@ func newDeployTestGroup(t *testing.T, log hclog.Logger, opts deployTestOptions) 
 			exitStatus = "TASK ERROR: out of disk space"
 		}
 
-		fmt.Fprintf(w, `{"data":{"upid":%q,"node":%q,"type":%q,"id":%q,"user":"root@pam","status":%q,"exitstatus":%q}}`,
+		//nolint:gosec//G705 // test-only mock server; the upid is validated above before being written
+		fmt.Fprintf(writer, `{"data":{"upid":%q,"node":%q,"type":%q,"id":%q,"user":"root@pam","status":%q,"exitstatus":%q}}`,
 			upid, deployTestNode, fields[5], fields[6], taskStatusStopped, exitStatus)
 	})
 
@@ -220,19 +229,21 @@ func newDeployTestGroup(t *testing.T, log hclog.Logger, opts deployTestOptions) 
 	templateID := deployTestTemplateID
 
 	ig := newWaitTestGroup()
-	ig.Pool = "test-pool"
-	ig.Storage = "local"
+	ig.Pool = deployTestPool
+	ig.Storage = deployTestStorage
 	ig.TemplateID = &templateID
-	ig.InstanceNameCreating = "fleeting-creating"
-	ig.InstanceNameRunning = "fleeting-running"
-	ig.InstanceNameRemoving = "fleeting-removing"
-	ig.InstanceTagsCreating = "fleeting-creating"
-	ig.InstanceTagsRunning = "fleeting-running"
-	ig.InstanceTagsRemoving = "fleeting-removing"
+	ig.InstanceNameCreating = DefaultInstanceNameCreating
+	ig.InstanceNameRunning = DefaultInstanceNameRunning
+	ig.InstanceNameRemoving = DefaultInstanceNameRemoving
+	ig.InstanceTagsCreating = DefaultInstanceNameCreating
+	ig.InstanceTagsRunning = DefaultInstanceNameRunning
+	ig.InstanceTagsRemoving = DefaultInstanceNameRemoving
+
 	if opts.autoresize {
-		ig.InstanceAutoresizeDisk = "scsi1"
-		ig.InstanceAutoresizeSize = "10G"
+		ig.InstanceAutoresizeDisk = deployTestAutoresizeDisk
+		ig.InstanceAutoresizeSize = deployTestAutoresizeSize
 	}
+
 	ig.log = log
 	ig.proxmox = proxmox.NewClient(server.URL)
 
@@ -253,22 +264,26 @@ func deployTestTemplate(t *testing.T, ig *InstanceGroup) *proxmox.VirtualMachine
 // A deploy that fails after the VM exists -- resize, start or agent -- must rename it to the
 // removing name with the removing tags, so the collector picks it up, and report the failure.
 func TestDeployInstanceMarksFailedInstanceForRemoval(t *testing.T) {
+	t.Parallel()
+
 	steps := []struct {
 		name        string
 		failStep    string
 		wantErrPart string
 	}{
-		{name: "resize fails", failStep: "autoresize", wantErrPart: "failed to resize disk"},
+		{name: "resize fails", failStep: deployTestFailStepAutoresize, wantErrPart: "failed to resize disk"},
 		{name: "start fails", failStep: "start", wantErrPart: "failed to start newly deployed instance"},
 		{name: "agent never comes up", failStep: "agent", wantErrPart: "failed when waiting for qemu agent"},
 	}
 
 	for _, step := range steps {
 		t.Run(step.name, func(t *testing.T) {
+			t.Parallel()
+
 			log, _ := newLogBuffer(t)
 
 			options := deployTestOptions{failStep: step.failStep}
-			if step.failStep == "autoresize" {
+			if step.failStep == deployTestFailStepAutoresize {
 				options.autoresize = true
 			}
 
@@ -285,7 +300,7 @@ func TestDeployInstanceMarksFailedInstanceForRemoval(t *testing.T) {
 			lastConfig, ok := counts.lastConfig()
 			require.True(t, ok, "the failed instance was never renamed")
 			require.Equal(t, map[string]any{
-				vmOptName: "fleeting-removing",
+				vmOptName: DefaultInstanceNameRemoving,
 				vmOptTags: "template-tag,fleeting-removing",
 			}, lastConfig)
 		})
@@ -295,7 +310,11 @@ func TestDeployInstanceMarksFailedInstanceForRemoval(t *testing.T) {
 // A failure before the VM can be configured -- the clone refused, or its task failing --
 // returns without renaming anything, because there is nothing to mark for removal.
 func TestDeployInstanceCloneFailureLeavesNoInstanceBehind(t *testing.T) {
+	t.Parallel()
+
 	t.Run("clone refused", func(t *testing.T) {
+		t.Parallel()
+
 		log, _ := newLogBuffer(t)
 		ig, counts := newDeployTestGroup(t, log, deployTestOptions{failStep: "clone"})
 
@@ -309,6 +328,8 @@ func TestDeployInstanceCloneFailureLeavesNoInstanceBehind(t *testing.T) {
 	})
 
 	t.Run("clone task fails", func(t *testing.T) {
+		t.Parallel()
+
 		log, _ := newLogBuffer(t)
 		ig, counts := newDeployTestGroup(t, log, deployTestOptions{failStep: "clone-task"})
 
@@ -326,6 +347,8 @@ func TestDeployInstanceCloneFailureLeavesNoInstanceBehind(t *testing.T) {
 // instance is up and the failure is logged. It keeps the creating name, so the next Init's
 // stale sweep marks it for removal.
 func TestDeployInstanceSurvivesFinalRenameFailure(t *testing.T) {
+	t.Parallel()
+
 	log, logBuf := newLogBuffer(t)
 
 	failCall := 1
@@ -341,7 +364,7 @@ func TestDeployInstanceSurvivesFinalRenameFailure(t *testing.T) {
 	configs := counts.allConfigs()
 	require.Len(t, configs, 1, "the failed rename must not be recorded: %v", configs)
 	require.Equal(t, map[string]any{
-		vmOptTags: "template-tag,fleeting-creating",
+		vmOptTags: deployTestTagsCreating,
 	}, configs[0])
 	require.Regexp(t, `\[ERROR\].*failed to rename instance`, logBuf.String())
 }
@@ -349,6 +372,8 @@ func TestDeployInstanceSurvivesFinalRenameFailure(t *testing.T) {
 // A failure writing the creating tags is reported before the rename, so no rename happens:
 // the instance keeps the creating name the clone was given.
 func TestDeployInstanceConfigFailureLeavesNoRenameBehind(t *testing.T) {
+	t.Parallel()
+
 	log, _ := newLogBuffer(t)
 
 	failCall := 0
@@ -365,6 +390,8 @@ func TestDeployInstanceConfigFailureLeavesNoRenameBehind(t *testing.T) {
 }
 
 func TestDeployInstanceAutoresize(t *testing.T) {
+	t.Parallel()
+
 	log, _ := newLogBuffer(t)
 	ig, counts := newDeployTestGroup(t, log, deployTestOptions{autoresize: true})
 
@@ -376,15 +403,15 @@ func TestDeployInstanceAutoresize(t *testing.T) {
 
 	resizes := counts.allResizes()
 	require.Len(t, resizes, 1)
-	require.Equal(t, map[string]any{"disk": "scsi1", "size": "10G"}, resizes[0])
+	require.Equal(t, map[string]any{"disk": deployTestAutoresizeDisk, "size": deployTestAutoresizeSize}, resizes[0])
 
 	configs := counts.allConfigs()
 	require.Len(t, configs, 2)
 	require.Equal(t, map[string]any{
-		vmOptTags: "template-tag,fleeting-creating",
+		vmOptTags: deployTestTagsCreating,
 	}, configs[0])
 	require.Equal(t, map[string]any{
-		vmOptName: "fleeting-running",
+		vmOptName: DefaultInstanceNameRunning,
 		vmOptTags: "template-tag,fleeting-running",
 	}, configs[1])
 }

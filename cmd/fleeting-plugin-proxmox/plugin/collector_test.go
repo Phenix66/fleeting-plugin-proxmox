@@ -11,10 +11,20 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+const (
+	collectorTestNode            = "pve-node"
+	collectorTestForeignCreating = "other-creating"
+	collectorTestMemberTypeLXC   = "lxc"
+	collectorTestPools           = "/pools"
+	collectorTestStatusCurrent   = "/status/current"
+)
+
 // collectInstance must refuse a VM whose fetched name is not InstanceNameRemoving: the pool
 // listing and the node fetch are not atomic, and acting on a stale listing could stop or
 // delete a VM we do not own.
 func TestCollectInstanceRefusesForeignVM(t *testing.T) {
+	t.Parallel()
+
 	type row struct {
 		name        string
 		fetchedName string
@@ -25,20 +35,20 @@ func TestCollectInstanceRefusesForeignVM(t *testing.T) {
 		{
 			// Fetched name is not InstanceNameRemoving: refuse.
 			name:        "refuse: fetched name differs from InstanceNameRemoving",
-			fetchedName: "other-creating",
+			fetchedName: collectorTestForeignCreating,
 			wantRefuse:  true,
 		},
 		{
 			// Our own fresh clone under a recycled VMID the listing still shows as removing:
 			// one of our names, but not the one it was listed under, so refuse.
 			name:        "refuse: fetched fleeting-creating",
-			fetchedName: "fleeting-creating",
+			fetchedName: DefaultInstanceNameCreating,
 			wantRefuse:  true,
 		},
 		{
 			// The same recycled VMID once its deploy has finished: a live runner.
 			name:        "refuse: fetched fleeting-running",
-			fetchedName: "fleeting-running",
+			fetchedName: DefaultInstanceNameRunning,
 			wantRefuse:  true,
 		},
 		{
@@ -47,24 +57,27 @@ func TestCollectInstanceRefusesForeignVM(t *testing.T) {
 		},
 	}
 
-	for _, tc := range rows {
-		t.Run(tc.name, func(t *testing.T) {
+	for _, row := range rows {
+		t.Run(row.name, func(t *testing.T) {
+			t.Parallel()
+
 			log, logBuf := newLogBuffer(t)
 			counts := &removalRequestCounts{}
 			ig := newRemovalTestGroup(t, removalTestServer{
 				log: log,
 				members: []removalTestMember{
-					{vmid: 100, name: "fleeting-removing", fetchedName: tc.fetchedName},
+					{vmid: 100, name: DefaultInstanceNameRemoving, fetchedName: row.fetchedName},
 				},
 				requests: counts,
 			})
 
-			member := proxmox.ClusterResource{VMID: 100, Type: vmTypeQEMU, Name: "fleeting-removing", Node: "pve-node"}
+			member := proxmox.ClusterResource{VMID: 100, Type: vmTypeQEMU, Name: DefaultInstanceNameRemoving, Node: collectorTestNode}
 			ig.collectInstance(context.Background(), member)
 
 			hasStop := counts.requested(100, http.MethodPost, "/status/stop")
-			require.Equal(t, !tc.wantRefuse, hasStop, "stop request: expected=%v, requests=%v", !tc.wantRefuse, counts.requestsFor(100))
-			if tc.wantRefuse {
+			require.Equal(t, !row.wantRefuse, hasStop, "stop request: expected=%v, requests=%v", !row.wantRefuse, counts.requestsFor(100))
+
+			if row.wantRefuse {
 				require.Regexp(t, `\[WARN\]`, logBuf.String(), "expected Warn for foreign VM")
 				require.NotContains(t, logBuf.String(), "[ERROR]", "a refusal is expected under VMID reuse, not an error")
 				require.Equal(t, []string{
@@ -82,17 +95,19 @@ func TestCollectInstanceRefusesForeignVM(t *testing.T) {
 // collectInstance must check the name again after waiting for a running VM to stop: the stop
 // takes at least one task poll, long enough for the VM to be deleted and its VMID reused.
 func TestCollectInstanceRechecksNameAfterStop(t *testing.T) {
+	t.Parallel()
+
 	log, logBuf := newLogBuffer(t)
 	counts := &removalRequestCounts{}
 	ig := newRemovalTestGroup(t, removalTestServer{
 		log: log,
 		members: []removalTestMember{
-			{vmid: 100, name: "fleeting-removing", fetchedNameAfterStop: "other-creating"},
+			{vmid: 100, name: DefaultInstanceNameRemoving, fetchedNameAfterStop: collectorTestForeignCreating},
 		},
 		requests: counts,
 	})
 
-	member := proxmox.ClusterResource{VMID: 100, Type: vmTypeQEMU, Name: "fleeting-removing", Node: "pve-node"}
+	member := proxmox.ClusterResource{VMID: 100, Type: vmTypeQEMU, Name: DefaultInstanceNameRemoving, Node: collectorTestNode}
 	ig.collectInstance(context.Background(), member)
 
 	require.True(t, counts.requested(100, http.MethodPost, "/status/stop"), "the owned VM was not stopped: %v", counts.requestsFor(100))
@@ -105,13 +120,15 @@ func TestCollectInstanceRechecksNameAfterStop(t *testing.T) {
 // InstanceNameRemoving and touches nothing else: not a member under another name, not one
 // that is not a VM at all.
 func TestCollectRemovedInstances(t *testing.T) {
+	t.Parallel()
+
 	counts := &removalRequestCounts{}
 	ig := newRemovalTestGroup(t, removalTestServer{
 		members: []removalTestMember{
-			{vmid: 100, name: "fleeting-removing"},
-			{vmid: 101, name: "fleeting-running"},
+			{vmid: 100, name: DefaultInstanceNameRemoving},
+			{vmid: 101, name: DefaultInstanceNameRunning},
 			{vmid: 102, name: "other-removing"},
-			{vmid: 103, name: "fleeting-removing", memberType: "lxc"},
+			{vmid: 103, name: DefaultInstanceNameRemoving, memberType: collectorTestMemberTypeLXC},
 		},
 		requests: counts,
 	})
@@ -126,11 +143,13 @@ func TestCollectRemovedInstances(t *testing.T) {
 }
 
 func TestCollectRemovedInstancesPoolFetchFailure(t *testing.T) {
+	t.Parallel()
+
 	log, logBuf := newLogBuffer(t)
 	counts := &removalRequestCounts{}
 	ig := newRemovalTestGroup(t, removalTestServer{
 		log:       log,
-		failPaths: []string{"/pools"},
+		failPaths: []string{collectorTestPools},
 		requests:  counts,
 	})
 
@@ -143,13 +162,15 @@ func TestCollectRemovedInstancesPoolFetchFailure(t *testing.T) {
 // fetchToCollect logs a failed fetch that is not an ownership refusal, so a VM that cannot
 // be read is not dropped silently.
 func TestFetchToCollectLogsFailedFetch(t *testing.T) {
+	t.Parallel()
+
 	log, logBuf := newLogBuffer(t)
 	ig := newRemovalTestGroup(t, removalTestServer{
 		log:       log,
-		failPaths: []string{"/status/current"},
+		failPaths: []string{collectorTestStatusCurrent},
 	})
 
-	member := &proxmox.ClusterResource{VMID: 100, Type: vmTypeQEMU, Name: "fleeting-removing", Node: "pve-node"}
+	member := &proxmox.ClusterResource{VMID: 100, Type: vmTypeQEMU, Name: DefaultInstanceNameRemoving, Node: collectorTestNode}
 
 	vm, ok := ig.fetchToCollect(context.Background(), member)
 	require.False(t, ok)
@@ -160,17 +181,19 @@ func TestFetchToCollectLogsFailedFetch(t *testing.T) {
 // A stop whose task fails must not be followed by a delete: the delete is the irreversible
 // step, and it happens only after a verified stop.
 func TestCollectInstanceStopTaskFailureSkipsDelete(t *testing.T) {
+	t.Parallel()
+
 	log, logBuf := newLogBuffer(t)
 	counts := &removalRequestCounts{}
 	ig := newRemovalTestGroup(t, removalTestServer{
 		log: log,
 		members: []removalTestMember{
-			{vmid: 100, name: "fleeting-removing", stopFails: true},
+			{vmid: 100, name: DefaultInstanceNameRemoving, stopFails: true},
 		},
 		requests: counts,
 	})
 
-	member := proxmox.ClusterResource{VMID: 100, Type: vmTypeQEMU, Name: "fleeting-removing", Node: "pve-node"}
+	member := proxmox.ClusterResource{VMID: 100, Type: vmTypeQEMU, Name: DefaultInstanceNameRemoving, Node: collectorTestNode}
 	ig.collectInstance(context.Background(), member)
 
 	require.True(t, counts.requested(100, http.MethodPost, "/status/stop"))
@@ -180,17 +203,19 @@ func TestCollectInstanceStopTaskFailureSkipsDelete(t *testing.T) {
 
 // A delete whose task fails is logged, not swallowed: the instance stays for the next run.
 func TestCollectInstanceDeleteTaskFailureIsLogged(t *testing.T) {
+	t.Parallel()
+
 	log, logBuf := newLogBuffer(t)
 	counts := &removalRequestCounts{}
 	ig := newRemovalTestGroup(t, removalTestServer{
 		log: log,
 		members: []removalTestMember{
-			{vmid: 100, name: "fleeting-removing", deleteFails: true},
+			{vmid: 100, name: DefaultInstanceNameRemoving, deleteFails: true},
 		},
 		requests: counts,
 	})
 
-	member := proxmox.ClusterResource{VMID: 100, Type: vmTypeQEMU, Name: "fleeting-removing", Node: "pve-node"}
+	member := proxmox.ClusterResource{VMID: 100, Type: vmTypeQEMU, Name: DefaultInstanceNameRemoving, Node: collectorTestNode}
 	ig.collectInstance(context.Background(), member)
 
 	require.True(t, counts.requested(100, http.MethodDelete, ""), "the delete was not attempted: %v", counts.requestsFor(100))
@@ -200,15 +225,17 @@ func TestCollectInstanceDeleteTaskFailureIsLogged(t *testing.T) {
 // A VM that is already stopped is deleted without a stop: the stop exists so the name can be
 // re-checked after the VM has been made safe, not to stop a stopped VM.
 func TestCollectInstanceSkipsStopForStoppedVM(t *testing.T) {
+	t.Parallel()
+
 	counts := &removalRequestCounts{}
 	ig := newRemovalTestGroup(t, removalTestServer{
 		members: []removalTestMember{
-			{vmid: 100, name: "fleeting-removing", vmStatus: "stopped"},
+			{vmid: 100, name: DefaultInstanceNameRemoving, vmStatus: "stopped"},
 		},
 		requests: counts,
 	})
 
-	member := proxmox.ClusterResource{VMID: 100, Type: vmTypeQEMU, Name: "fleeting-removing", Node: "pve-node"}
+	member := proxmox.ClusterResource{VMID: 100, Type: vmTypeQEMU, Name: DefaultInstanceNameRemoving, Node: collectorTestNode}
 	ig.collectInstance(context.Background(), member)
 
 	require.False(t, counts.requested(100, http.MethodPost, "/status/stop"), "a stopped VM was asked to stop: %v", counts.requestsFor(100))
@@ -218,10 +245,12 @@ func TestCollectInstanceSkipsStopForStoppedVM(t *testing.T) {
 // The collection trigger is how markInstancesForRemoval wakes the collector: a token on the
 // channel starts another collection run without waiting for the interval.
 func TestCollectorTriggerWakesCollector(t *testing.T) {
+	t.Parallel()
+
 	counts := &removalRequestCounts{}
 	ig := newRemovalTestGroup(t, removalTestServer{
 		members: []removalTestMember{
-			{vmid: 100, name: "fleeting-removing"},
+			{vmid: 100, name: DefaultInstanceNameRemoving},
 		},
 		requests: counts,
 	})
@@ -229,15 +258,15 @@ func TestCollectorTriggerWakesCollector(t *testing.T) {
 	ig.startRemovedInstanceCollector()
 
 	stopCount := func() int {
-		n := 0
+		count := 0
 
 		for _, request := range counts.requestsFor(100) {
 			if strings.HasPrefix(request, http.MethodPost+" ") && strings.Contains(request, "/status/stop") {
-				n++
+				count++
 			}
 		}
 
-		return n
+		return count
 	}
 
 	// The run the collector does on start serves the first stop.
@@ -254,6 +283,8 @@ func TestCollectorTriggerWakesCollector(t *testing.T) {
 
 // The collector loop returns once the shutdown trigger fires, so Shutdown cannot hang on it.
 func TestCollectorStopsOnShutdown(t *testing.T) {
+	t.Parallel()
+
 	ig := newRemovalTestGroup(t, removalTestServer{})
 
 	ig.startRemovedInstanceCollector()
@@ -263,6 +294,8 @@ func TestCollectorStopsOnShutdown(t *testing.T) {
 
 // An empty channel accepts the wake-up: triggerCollection never drops it.
 func TestTriggerCollectionSendsOnEmptyChannel(t *testing.T) {
+	t.Parallel()
+
 	ig := &InstanceGroup{instanceCollectionTrigger: make(chan struct{}, 1)}
 
 	ig.triggerCollection()
@@ -271,6 +304,8 @@ func TestTriggerCollectionSendsOnEmptyChannel(t *testing.T) {
 }
 
 func TestTriggerCollectionOnFullChannelReturnsImmediately(t *testing.T) {
+	t.Parallel()
+
 	ig := &InstanceGroup{
 		instanceCollectionTrigger: make(chan struct{}, 1),
 	}

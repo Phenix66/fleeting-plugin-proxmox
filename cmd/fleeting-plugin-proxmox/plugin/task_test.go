@@ -15,7 +15,10 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-var testTaskUPID = testUPID("qmclone")
+// testTaskUPID is the UPID of the fake clone task the wait tests poll.
+func testTaskUPID() proxmox.UPID {
+	return testUPID("qmclone")
+}
 
 // testUPID builds the UPID of a task of the given type against the fake node.
 func testUPID(taskType string) proxmox.UPID {
@@ -34,15 +37,15 @@ func taskStatusBody(taskType, status, exitStatus string) string {
 func taskHandler(t *testing.T, taskType, status, exitStatus, logLine string) http.HandlerFunc {
 	t.Helper()
 
-	return func(w http.ResponseWriter, r *http.Request) {
+	return func(writer http.ResponseWriter, request *http.Request) {
 		switch {
-		case strings.HasSuffix(r.URL.Path, "/status"):
-			fmt.Fprint(w, taskStatusBody(taskType, status, exitStatus))
-		case strings.HasSuffix(r.URL.Path, "/log"):
-			fmt.Fprintf(w, `{"data":[{"n":1,"t":%q}]}`, logLine)
+		case strings.HasSuffix(request.URL.Path, "/status"):
+			fmt.Fprint(writer, taskStatusBody(taskType, status, exitStatus))
+		case strings.HasSuffix(request.URL.Path, "/log"):
+			fmt.Fprintf(writer, `{"data":[{"n":1,"t":%q}]}`, logLine)
 		default:
-			t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
-			w.WriteHeader(http.StatusNotFound)
+			t.Errorf("unexpected request: %s %s", request.Method, request.URL.Path)
+			writer.WriteHeader(http.StatusNotFound)
 		}
 	}
 }
@@ -52,12 +55,14 @@ func newWaitTestGroup() *InstanceGroup {
 	waitInterval := 1
 
 	return &InstanceGroup{
-		Settings: Settings{ProxmoxTaskWaitInterval: &waitInterval},
-		log:      hclog.NewNullLogger(),
+		ProxmoxTaskWaitInterval: &waitInterval,
+		log:                     hclog.NewNullLogger(),
 	}
 }
 
 func TestClassifyTask(t *testing.T) {
+	t.Parallel()
+
 	testCases := []struct {
 		name        string
 		status      string
@@ -94,6 +99,8 @@ func TestClassifyTask(t *testing.T) {
 
 	for _, testCase := range testCases {
 		t.Run(testCase.name, func(t *testing.T) {
+			t.Parallel()
+
 			err := classifyTask(testCase.status, testCase.exitStatus)
 
 			if testCase.expectedErr == nil {
@@ -114,6 +121,8 @@ func TestClassifyTask(t *testing.T) {
 // One end-to-end case for the wiring: classifyTask's verdict reaches the caller, and a real
 // failure pulls Proxmox's own explanation into the log. The branch matrix is TestClassifyTask's.
 func TestInstanceGroup_waitTask(t *testing.T) {
+	t.Parallel()
+
 	var logFetched atomic.Bool
 
 	handler := taskHandler(t, "qmclone", taskStatusStopped, "unable to parse volume ID 'local-lvm:'", "volume parse failed")
@@ -127,7 +136,7 @@ func TestInstanceGroup_waitTask(t *testing.T) {
 	}))
 	defer server.Close()
 
-	task := proxmox.NewTask(testTaskUPID, proxmox.NewClient(server.URL))
+	task := proxmox.NewTask(testTaskUPID(), proxmox.NewClient(server.URL))
 
 	err := newWaitTestGroup().waitTask(context.Background(), task, time.Second)
 
@@ -137,6 +146,8 @@ func TestInstanceGroup_waitTask(t *testing.T) {
 }
 
 func TestInstanceGroup_waitTaskNilTask(t *testing.T) {
+	t.Parallel()
+
 	// An operation Proxmox answers with null data yields no task to wait on. That is not an
 	// error here -- it may be a synchronous completion -- but it is never silent.
 	log, logBuffer := newLogBuffer(t)
@@ -151,10 +162,12 @@ func TestInstanceGroup_waitTaskNilTask(t *testing.T) {
 // A task that keeps reporting running times out instead of being trusted: Wait's timeout is
 // surfaced to the caller.
 func TestInstanceGroup_waitTaskTimesOutOnRunningTask(t *testing.T) {
+	t.Parallel()
+
 	server := httptest.NewServer(taskHandler(t, "qmclone", "running", "", ""))
 	defer server.Close()
 
-	task := proxmox.NewTask(testTaskUPID, proxmox.NewClient(server.URL))
+	task := proxmox.NewTask(testTaskUPID(), proxmox.NewClient(server.URL))
 
 	err := newWaitTestGroup().waitTask(context.Background(), task, 100*time.Millisecond)
 	require.Error(t, err)
@@ -164,6 +177,8 @@ func TestInstanceGroup_waitTaskTimesOutOnRunningTask(t *testing.T) {
 // A poll whose response carries no status field is never trusted as success, and a task that
 // was never observed as stopped has no log to fetch.
 func TestInstanceGroup_waitTaskBlankStatusDoesNotFetchLog(t *testing.T) {
+	t.Parallel()
+
 	var logFetched atomic.Bool
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -175,7 +190,7 @@ func TestInstanceGroup_waitTaskBlankStatusDoesNotFetchLog(t *testing.T) {
 	}))
 	defer server.Close()
 
-	task := proxmox.NewTask(testTaskUPID, proxmox.NewClient(server.URL))
+	task := proxmox.NewTask(testTaskUPID(), proxmox.NewClient(server.URL))
 
 	err := newWaitTestGroup().waitTask(context.Background(), task, time.Second)
 	require.ErrorIs(t, err, ErrTaskFailed)
@@ -186,23 +201,25 @@ func TestInstanceGroup_waitTaskBlankStatusDoesNotFetchLog(t *testing.T) {
 // A failure to fetch the task log is reported alongside the task failure, never in place of
 // it: the exit status is what the caller acts on.
 func TestInstanceGroup_waitTaskLogFailureDoesNotMaskTaskFailure(t *testing.T) {
+	t.Parallel()
+
 	log, logBuffer := newLogBuffer(t)
 
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, r *http.Request) {
 		if strings.HasSuffix(r.URL.Path, "/log") {
-			http.Error(w, "log unavailable", http.StatusInternalServerError)
+			http.Error(writer, "log unavailable", http.StatusInternalServerError)
 
 			return
 		}
 
-		fmt.Fprint(w, taskStatusBody("qmclone", taskStatusStopped, "unable to parse volume ID 'local-lvm:'"))
+		fmt.Fprint(writer, taskStatusBody("qmclone", taskStatusStopped, "unable to parse volume ID 'local-lvm:'"))
 	}))
 	defer server.Close()
 
 	group := newWaitTestGroup()
 	group.log = log
 
-	task := proxmox.NewTask(testTaskUPID, proxmox.NewClient(server.URL))
+	task := proxmox.NewTask(testTaskUPID(), proxmox.NewClient(server.URL))
 
 	err := group.waitTask(context.Background(), task, time.Second)
 	require.ErrorIs(t, err, ErrTaskFailed)
@@ -213,18 +230,20 @@ func TestInstanceGroup_waitTaskLogFailureDoesNotMaskTaskFailure(t *testing.T) {
 // taskLog orders the page by line number: Proxmox's log endpoint keys its lines by number,
 // and a JSON object's key order is not that order.
 func TestTaskLogOrdersLinesByLineNumber(t *testing.T) {
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	t.Parallel()
+
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, r *http.Request) {
 		if !strings.HasSuffix(r.URL.Path, "/log") {
-			http.NotFound(w, r)
+			http.NotFound(writer, r)
 
 			return
 		}
 
-		fmt.Fprint(w, `{"data":[{"n":3,"t":"third line"},{"n":1,"t":"first line"},{"n":2,"t":"second line"}]}`)
+		fmt.Fprint(writer, `{"data":[{"n":3,"t":"third line"},{"n":1,"t":"first line"},{"n":2,"t":"second line"}]}`)
 	}))
 	defer server.Close()
 
-	task := proxmox.NewTask(testTaskUPID, proxmox.NewClient(server.URL))
+	task := proxmox.NewTask(testTaskUPID(), proxmox.NewClient(server.URL))
 
 	lines, err := taskLog(context.Background(), task)
 	require.NoError(t, err)

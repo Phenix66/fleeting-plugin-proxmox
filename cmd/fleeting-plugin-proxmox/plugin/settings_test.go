@@ -20,9 +20,13 @@ var (
 	sampleInstanceNameCreating = "proxmox-creating"
 	sampleInstanceNameRunning  = "running-prox"
 	sampleInstanceNameRemoving = "proxve-removing"
+	sampleAutoresizeDisk       = "ide0"
+	sampleAutoresizeSize       = "10G"
 )
 
 func TestSettings_fillWithDefaults(t *testing.T) {
+	t.Parallel()
+
 	settings := Settings{}
 	settings.FillWithDefaults()
 
@@ -47,6 +51,8 @@ func TestSettings_fillWithDefaults(t *testing.T) {
 }
 
 func TestSettings_checkRequiredFields(t *testing.T) {
+	t.Parallel()
+
 	tests := []struct {
 		name          string
 		settings      Settings
@@ -186,15 +192,19 @@ func TestSettings_checkRequiredFields(t *testing.T) {
 		},
 	}
 
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			err := tt.settings.CheckRequiredFields()
-			require.ErrorIs(t, err, tt.expectedError)
+	for _, testCase := range tests {
+		t.Run(testCase.name, func(t *testing.T) {
+			t.Parallel()
+
+			err := testCase.settings.CheckRequiredFields()
+			require.ErrorIs(t, err, testCase.expectedError)
 		})
 	}
 }
 
 func TestSettings_validateInstanceAutoresizeDisk(t *testing.T) {
+	t.Parallel()
+
 	tests := []struct {
 		name          string
 		disk          string
@@ -207,7 +217,7 @@ func TestSettings_validateInstanceAutoresizeDisk(t *testing.T) {
 		},
 		{
 			name:          "Valid ide0",
-			disk:          "ide0",
+			disk:          sampleAutoresizeDisk,
 			expectedError: nil,
 		},
 		{
@@ -283,18 +293,22 @@ func TestSettings_validateInstanceAutoresizeDisk(t *testing.T) {
 		},
 	}
 
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
+	for _, testCase := range tests {
+		t.Run(testCase.name, func(t *testing.T) {
+			t.Parallel()
+
 			settings := Settings{
-				InstanceAutoresizeDisk: tt.disk,
+				InstanceAutoresizeDisk: testCase.disk,
 			}
 			err := settings.validateInstanceAutoresizeDisk()
-			require.ErrorIs(t, err, tt.expectedError)
+			require.ErrorIs(t, err, testCase.expectedError)
 		})
 	}
 }
 
 func TestSettings_validateInstanceAutoresizeSize(t *testing.T) {
+	t.Parallel()
+
 	tests := []struct {
 		name          string
 		size          string
@@ -312,7 +326,7 @@ func TestSettings_validateInstanceAutoresizeSize(t *testing.T) {
 		},
 		{
 			name:          "Valid absolute size 10G",
-			size:          "10G",
+			size:          sampleAutoresizeSize,
 			expectedError: nil,
 		},
 		{
@@ -362,18 +376,22 @@ func TestSettings_validateInstanceAutoresizeSize(t *testing.T) {
 		},
 	}
 
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
+	for _, testCase := range tests {
+		t.Run(testCase.name, func(t *testing.T) {
+			t.Parallel()
+
 			settings := Settings{
-				InstanceAutoresizeSize: tt.size,
+				InstanceAutoresizeSize: testCase.size,
 			}
 			err := settings.validateInstanceAutoresizeSize()
-			require.ErrorIs(t, err, tt.expectedError)
+			require.ErrorIs(t, err, testCase.expectedError)
 		})
 	}
 }
 
 func TestSettings_validateInstanceAutoresizeConsistency(t *testing.T) {
+	t.Parallel()
+
 	tests := []struct {
 		name          string
 		disk          string
@@ -388,37 +406,41 @@ func TestSettings_validateInstanceAutoresizeConsistency(t *testing.T) {
 		},
 		{
 			name:          "Both set is valid",
-			disk:          "ide0",
-			size:          "10G",
+			disk:          sampleAutoresizeDisk,
+			size:          sampleAutoresizeSize,
 			expectedError: nil,
 		},
 		{
 			name:          "Disk without size is invalid",
-			disk:          "ide0",
+			disk:          sampleAutoresizeDisk,
 			size:          "",
 			expectedError: ErrSettingInvalidParameter,
 		},
 		{
 			name:          "Size without disk is invalid",
 			disk:          "",
-			size:          "10G",
+			size:          sampleAutoresizeSize,
 			expectedError: ErrSettingInvalidParameter,
 		},
 	}
 
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
+	for _, testCase := range tests {
+		t.Run(testCase.name, func(t *testing.T) {
+			t.Parallel()
+
 			settings := Settings{
-				InstanceAutoresizeDisk: tt.disk,
-				InstanceAutoresizeSize: tt.size,
+				InstanceAutoresizeDisk: testCase.disk,
+				InstanceAutoresizeSize: testCase.size,
 			}
 			err := settings.validateInstanceAutoresizeConsistency()
-			require.ErrorIs(t, err, tt.expectedError)
+			require.ErrorIs(t, err, testCase.expectedError)
 		})
 	}
 }
 
 func TestGetDiskMaxIndex(t *testing.T) {
+	t.Parallel()
+
 	tests := []struct {
 		name     string
 		diskType string
@@ -446,14 +468,18 @@ func TestGetDiskMaxIndex(t *testing.T) {
 		},
 	}
 
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			require.Equal(t, tt.expected, getDiskMaxIndex(tt.diskType))
+	for _, testCase := range tests {
+		t.Run(testCase.name, func(t *testing.T) {
+			t.Parallel()
+
+			require.Equal(t, testCase.expected, getDiskMaxIndex(testCase.diskType))
 		})
 	}
 }
 
 func TestSettings_CheckRequiredFields_fullValidation(t *testing.T) {
+	t.Parallel()
+
 	tests := []struct {
 		name          string
 		settings      Settings
@@ -467,7 +493,7 @@ func TestSettings_CheckRequiredFields_fullValidation(t *testing.T) {
 				Pool:                   samplePool,
 				TemplateID:             &sampleTemplateID,
 				MaxInstances:           &sampleMaxInstances,
-				InstanceAutoresizeDisk: "ide0",
+				InstanceAutoresizeDisk: sampleAutoresizeDisk,
 			},
 			expectedError: ErrSettingInvalidParameter,
 		},
@@ -479,8 +505,8 @@ func TestSettings_CheckRequiredFields_fullValidation(t *testing.T) {
 				Pool:                   samplePool,
 				TemplateID:             &sampleTemplateID,
 				MaxInstances:           &sampleMaxInstances,
-				InstanceAutoresizeDisk: "ide0",
-				InstanceAutoresizeSize: "10G",
+				InstanceAutoresizeDisk: sampleAutoresizeDisk,
+				InstanceAutoresizeSize: sampleAutoresizeSize,
 			},
 			expectedError: nil,
 		},
@@ -493,7 +519,7 @@ func TestSettings_CheckRequiredFields_fullValidation(t *testing.T) {
 				TemplateID:             &sampleTemplateID,
 				MaxInstances:           &sampleMaxInstances,
 				InstanceAutoresizeDisk: "nvme0",
-				InstanceAutoresizeSize: "10G",
+				InstanceAutoresizeSize: sampleAutoresizeSize,
 			},
 			expectedError: ErrSettingInvalidParameter,
 		},
@@ -505,17 +531,19 @@ func TestSettings_CheckRequiredFields_fullValidation(t *testing.T) {
 				Pool:                   samplePool,
 				TemplateID:             &sampleTemplateID,
 				MaxInstances:           &sampleMaxInstances,
-				InstanceAutoresizeDisk: "ide0",
+				InstanceAutoresizeDisk: sampleAutoresizeDisk,
 				InstanceAutoresizeSize: "invalid",
 			},
 			expectedError: ErrSettingInvalidParameter,
 		},
 	}
 
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			err := tt.settings.CheckRequiredFields()
-			require.ErrorIs(t, err, tt.expectedError)
+	for _, testCase := range tests {
+		t.Run(testCase.name, func(t *testing.T) {
+			t.Parallel()
+
+			err := testCase.settings.CheckRequiredFields()
+			require.ErrorIs(t, err, testCase.expectedError)
 		})
 	}
 }

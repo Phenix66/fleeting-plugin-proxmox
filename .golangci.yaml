@@ -1,4 +1,6 @@
 version: "2"
+run:
+  timeout: 5m
 linters:
   default: all
   disable:
@@ -6,19 +8,14 @@ linters:
     - exhaustruct
     - exhaustruct_v5
     - funlen
-    - godox
+    - gomodguard
     - gomodguard_v2
     - musttag
-    - nlreturn
-    - paralleltest
     - testpackage
     - wsl # deprecated
   settings:
     cyclop:
       max-complexity: 15
-    gosec:
-      excludes:
-        - G115 # causes too many false positives with VM ids that can never be negative
     lll:
       line-length: 200
       tab-width: 2
@@ -45,11 +42,9 @@ linters:
       - third_party$
       - builtin$
       - examples$
-      - ".*_test.go$"
 formatters:
   enable:
     - gci
-    - gofmt
     - gofumpt
     - goimports
   exclusions:

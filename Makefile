@@ -38,7 +38,7 @@ tools/go-licenses:
 
 tools/golangci-lint:
 	@$(call INFO,"Installing tool $(shell basename $@)")
-	GOBIN=$$(realpath $$(dirname $@)) go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.13.2
+	GOBIN=$$(realpath $$(dirname $@)) go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.14.0
 
 ################################################################################
 # Linters (and checks)
