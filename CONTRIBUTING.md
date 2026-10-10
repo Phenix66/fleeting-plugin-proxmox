@@ -43,18 +43,25 @@ By making a contribution to this project, I certify that:
 
 ## Signed Commits
 
-All commits **must be signed and validated**. See the [GitHub Docs](https://docs.github.com/en/authentication/managing-commit-signature-verification/signing-commits)
-for instructions on how to configure this. Pull requests with commits that do not
-show "Verified" cannot be merged per project settings.
+All commits **must be signed off and signature-verified**. A continuous integration
+check inspects every commit in a pull request and fails if any commit does not (1)
+carry a `Signed-off-by` line that matches the commit's author name and email, and
+(2) show "Verified" on GitHub. Pull requests that fail this check cannot be merged
+per project settings.
 
-Additionally, a `Signed-off-by` line that matches the commit's author name and email
-is _strongly_ encouraged. This message can be entered manually, or if you have configured
-git with the correct user.name and user.email, you can use the -s option to git commit
-to automatically include the signoff message.
+To sign commits, see the [GitHub Docs](https://docs.github.com/en/authentication/managing-commit-signature-verification/signing-commits)
+for instructions on how to configure GPG or SSH signing.
+
+To sign off, use the `-s` option with `git commit`, or enter the message manually.
+The `-s` option automatically uses the configured user.name and user.email.
 
 ```
 Signed-off-by: Tux <tux@email.com>
 ```
+
+The signoff name and email must match the commit's author exactly (email matching is
+case-insensitive), so make sure the user.name and user.email in your git configuration
+matches your GitHub identity.
 
 ## Issues and Pull Requests
 

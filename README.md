@@ -60,9 +60,9 @@ The template must be a bootable VM with enabled DHCP and QEMU guest agent instal
 
 ### Proxmox configuration
 
-You **MUST** create a **DEDICATED** user, pool and storage for usage with this plugin. Any other configuration is untested and unsupported.
+You **MUST** create a **DEDICATED** user, pool, and storage for usage with this plugin. Any other configuration is untested and unsupported.
 
-After creating a **DEDICATED** user, pool and storage follow procedure below to add required permissions:
+After creating a **DEDICATED** user, pool and, storage follow procedure below to add required permissions:
 
 1. Add template VM as a member to the pool.
 2. Add storage as a member to the pool.
