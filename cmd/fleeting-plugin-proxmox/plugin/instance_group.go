@@ -85,6 +85,13 @@ type InstanceGroup struct {
 	// Per-instance so a test can shorten it on its own group without touching shared state.
 	deployedVMLookupWindow time.Duration `json:"-"`
 
+	// deployingMu guards deploying: the VMIDs a live deployInstance is working on, from the
+	// clone's VMID allocation until the deployment renames the instance away from creating.
+	// The collector's stale sweep skips them: a deploying instance is creating by design, and
+	// only the deployment may rename it.
+	deployingMu sync.Mutex       `json:"-"`
+	deploying   map[int]struct{} `json:"-"`
+
 	// Trigger to shutdown collector.
 	collectorShutdownTrigger chan struct{} `json:"-"`
 
@@ -564,6 +571,13 @@ func (ig *InstanceGroup) resetLifecycle() {
 	ig.poolCache = nil
 	ig.poolCacheAt = time.Time{}
 	ig.poolCacheMu.Unlock()
+
+	// A re-Init starts a fresh lifecycle: no deployment of the previous cycle belongs to it,
+	// and any creating instance the previous cycle left, the stale sweep at Init -- which
+	// ignores the map -- marks for removal.
+	ig.deployingMu.Lock()
+	ig.deploying = nil
+	ig.deployingMu.Unlock()
 
 	// Channels only exist after the first reset, and they are created together, so one
 	// check covers both.

@@ -36,6 +36,11 @@ var ErrCloneVMWithoutConfiguredStorage = errors.New("attempted to clone a VM wit
 func (ig *InstanceGroup) deployInstance(ctx context.Context, template *proxmox.VirtualMachine) (int, error) {
 	VMID, task, err := ig.cloneTemplate(ctx, template)
 	if err == nil {
+		// The deployment owns the VMID from here on: the instance is creating by design until
+		// the rename below, and only the deployment may rename it, so the collector's stale
+		// sweep must not touch it.
+		defer ig.stopTrackingDeploying(VMID)
+
 		ig.log.Info("Deploying new instance", "vmid", VMID)
 
 		err = ig.waitTask(ctx, task, proxmoxTaskWaitTimeout)
@@ -215,7 +220,44 @@ func (ig *InstanceGroup) cloneTemplate(ctx context.Context, template *proxmox.Vi
 		return -1, nil, fmt.Errorf("failed to clone the template: %w", err)
 	}
 
+	// Track the VMID before the cloning lock is released by the defer above: a pool listing
+	// cannot be taken while the lock is held, and once it is released the VMID must already
+	// be tracked, or the collector's stale sweep could mark a just-cloned, still-creating
+	// instance for removal.
+	ig.trackDeploying(VMID)
+
 	return VMID, task, nil
+}
+
+// trackDeploying records that a live deployInstance owns vmid, until
+// stopTrackingDeploying releases it. The collector's stale sweep refuses to touch a tracked
+// VMID: a deploying instance is creating by design, and only the deployment renames it.
+func (ig *InstanceGroup) trackDeploying(vmid int) {
+	ig.deployingMu.Lock()
+	if ig.deploying == nil {
+		ig.deploying = make(map[int]struct{})
+	}
+
+	ig.deploying[vmid] = struct{}{}
+
+	ig.deployingMu.Unlock()
+}
+
+// stopTrackingDeploying releases the tracking trackDeploying took for vmid.
+func (ig *InstanceGroup) stopTrackingDeploying(vmid int) {
+	ig.deployingMu.Lock()
+	delete(ig.deploying, vmid)
+	ig.deployingMu.Unlock()
+}
+
+// isDeploying reports whether a live deployInstance owns vmid.
+func (ig *InstanceGroup) isDeploying(vmid int) bool {
+	ig.deployingMu.Lock()
+	defer ig.deployingMu.Unlock()
+
+	_, ok := ig.deploying[vmid]
+
+	return ok
 }
 
 func (ig *InstanceGroup) getTemplateCloneOptions(template *proxmox.VirtualMachine) (*proxmox.VirtualMachineCloneOptions, error) {

@@ -80,18 +80,49 @@ func (ig *InstanceGroup) collectRemovedInstances() {
 
 	members := make([]proxmox.ClusterResource, 0, len(pool.Members))
 
+	stale := make([]*proxmox.ClusterResource, 0)
+
 	for _, member := range pool.Members {
 		if !ig.isProxmoxResourceAnInstance(member) {
 			continue
 		}
 
-		if member.Name != ig.InstanceNameRemoving {
-			continue
+		switch member.Name {
+		case ig.InstanceNameRemoving:
+			ig.log.Info("collector found instance to remove", "vmid", member.VMID, "name", member.Name)
+
+			members = append(members, member)
+		case ig.InstanceNameCreating:
+			// A creating instance with no deployment in flight is an orphan a failed
+			// deployment left: a failed clone, or a failed deployment whose rename to
+			// removing also failed, keeps the creating name. The stale sweep at Init covers
+			// orphans left by a previous run; this covers the ones this run's deployments
+			// leave. Mark it for removal; the round the mark triggers collects it, and a
+			// failed mark is retried on the next round.
+			//nolint:gosec//G115 // member.VMID is a Proxmox VMID, which always fits in an int
+			if ig.isDeploying(int(member.VMID)) {
+				continue
+			}
+
+			ig.log.Info("collector found orphaned creating instance, marking for removal", "vmid", member.VMID, "name", member.Name)
+
+			stale = append(stale, &member)
 		}
+	}
 
-		ig.log.Info("collector found instance to remove", "vmid", member.VMID, "name", member.Name)
+	// The orphans are renamed, not deleted here: deletion is the next round's job, and it
+	// applies to them the same name re-check and the same per-member budget as to any
+	// removing member.
+	if len(stale) > 0 {
+		// Each failure is already logged with its vmid where it happened; the aggregate
+		// says how many of the round's orphans will retry on the next round.
+		errs := ig.markInstancesForRemoval(ctx, stale)
 
-		members = append(members, member)
+		err := errors.Join(errs...)
+		if err != nil {
+			ig.log.Error("collector failed to mark some orphaned creating instances for removal",
+				"attempted", len(stale), "err", err)
+		}
 	}
 
 	// The per-instance work runs under the same batch cap as every other batch: a round can

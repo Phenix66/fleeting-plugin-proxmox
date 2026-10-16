@@ -15,9 +15,12 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+// testTaskTypeClone is the task type the fakes carry in a clone task's UPID.
+const testTaskTypeClone = "qmclone"
+
 // testTaskUPID is the UPID of the fake clone task the wait tests poll.
 func testTaskUPID() proxmox.UPID {
-	return testUPID("qmclone")
+	return testUPID(testTaskTypeClone)
 }
 
 // testUPID builds the UPID of a task of the given type against the fake node.
@@ -125,7 +128,7 @@ func TestInstanceGroup_waitTask(t *testing.T) {
 
 	var logFetched atomic.Bool
 
-	handler := taskHandler(t, "qmclone", taskStatusStopped, "unable to parse volume ID 'local-lvm:'", "volume parse failed")
+	handler := taskHandler(t, testTaskTypeClone, taskStatusStopped, "unable to parse volume ID 'local-lvm:'", "volume parse failed")
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if strings.HasSuffix(r.URL.Path, "/log") {
@@ -164,7 +167,7 @@ func TestInstanceGroup_waitTaskNilTask(t *testing.T) {
 func TestInstanceGroup_waitTaskTimesOutOnRunningTask(t *testing.T) {
 	t.Parallel()
 
-	server := httptest.NewServer(taskHandler(t, "qmclone", "running", "", ""))
+	server := httptest.NewServer(taskHandler(t, testTaskTypeClone, "running", "", ""))
 	defer server.Close()
 
 	task := proxmox.NewTask(testTaskUPID(), proxmox.NewClient(server.URL))
@@ -180,7 +183,7 @@ func TestInstanceGroup_waitTaskTimesOutOnRunningTask(t *testing.T) {
 func TestInstanceGroup_waitTaskCancellationFiresBetweenPolls(t *testing.T) {
 	t.Parallel()
 
-	server := httptest.NewServer(taskHandler(t, "qmclone", "running", "", ""))
+	server := httptest.NewServer(taskHandler(t, testTaskTypeClone, "running", "", ""))
 	defer server.Close()
 
 	task := proxmox.NewTask(testTaskUPID(), proxmox.NewClient(server.URL))
@@ -207,7 +210,7 @@ func TestInstanceGroup_waitTaskCancellationFiresBetweenPolls(t *testing.T) {
 func TestInstanceGroup_waitTaskTimeoutFiresBetweenPolls(t *testing.T) {
 	t.Parallel()
 
-	server := httptest.NewServer(taskHandler(t, "qmclone", "running", "", ""))
+	server := httptest.NewServer(taskHandler(t, testTaskTypeClone, "running", "", ""))
 	defer server.Close()
 
 	task := proxmox.NewTask(testTaskUPID(), proxmox.NewClient(server.URL))
@@ -234,7 +237,7 @@ func TestInstanceGroup_waitTaskBlankStatusDoesNotFetchLog(t *testing.T) {
 			logFetched.Store(true)
 		}
 
-		fmt.Fprint(w, taskStatusBody("qmclone", "", ""))
+		fmt.Fprint(w, taskStatusBody(testTaskTypeClone, "", ""))
 	}))
 	defer server.Close()
 
@@ -260,7 +263,7 @@ func TestInstanceGroup_waitTaskLogFailureDoesNotMaskTaskFailure(t *testing.T) {
 			return
 		}
 
-		fmt.Fprint(writer, taskStatusBody("qmclone", taskStatusStopped, "unable to parse volume ID 'local-lvm:'"))
+		fmt.Fprint(writer, taskStatusBody(testTaskTypeClone, taskStatusStopped, "unable to parse volume ID 'local-lvm:'"))
 	}))
 	defer server.Close()
 

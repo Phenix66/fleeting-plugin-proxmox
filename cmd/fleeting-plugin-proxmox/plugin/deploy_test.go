@@ -23,7 +23,11 @@ const (
 	deployTestCloneVMID          = 100
 	deployTestPool               = "test-pool"
 	deployTestStorage            = "local"
+	deployTestFailStepClone      = "clone"
+	deployTestFailStepCloneTask  = "clone-task"
 	deployTestFailStepAutoresize = "autoresize"
+	deployTestFailStepStart      = "start"
+	deployTestFailStepAgent      = "agent"
 	deployTestAutoresizeSize     = "10G"
 	deployTestAutoresizeDisk     = "scsi1"
 	deployTestTagsCreating       = "template-tag,fleeting-creating"
@@ -58,6 +62,10 @@ type deployTestOptions struct {
 	// poolBodies, when non-empty, are served one per pool request, the last one repeating;
 	// they let a test simulate a listing that lags the clone the way Proxmox's pool can.
 	poolBodies []string
+
+	// holdCloneTask, when non-nil, is called synchronously before each qmclone task /status
+	// poll is answered, so a test can hold the clone in flight for a controlled window.
+	holdCloneTask func()
 }
 
 // deployTestCounts records what a deploy asked the fake to do, so a test can assert on the
@@ -125,6 +133,43 @@ func registerDeployPoolRoute(mux *http.ServeMux, opts deployTestOptions, counts 
 		}
 
 		fmt.Fprint(writer, body)
+	})
+}
+
+// registerDeployTaskRoute serves the node's task route: every task reports stopped, except a
+// clone task when opts names the clone-task failure.
+func registerDeployTaskRoute(t *testing.T, mux *http.ServeMux, opts deployTestOptions) {
+	t.Helper()
+
+	mux.HandleFunc("GET /nodes/"+deployTestNode+"/tasks/", func(writer http.ResponseWriter, request *http.Request) {
+		if strings.HasSuffix(request.URL.Path, "/log") {
+			fmt.Fprint(writer, `{"data":[]}`)
+
+			return
+		}
+
+		upid := strings.TrimSuffix(strings.TrimPrefix(request.URL.Path, "/nodes/"+deployTestNode+"/tasks/"), "/status")
+
+		fields := strings.Split(upid, ":")
+		if len(fields) < 8 {
+			t.Errorf("task route asked for a malformed UPID: %q", upid)
+			http.Error(writer, "malformed upid", http.StatusBadRequest)
+
+			return
+		}
+
+		exitStatus := taskExitStatusOK
+		if fields[5] == testTaskTypeClone && opts.failStep == deployTestFailStepCloneTask {
+			exitStatus = "TASK ERROR: out of disk space"
+		}
+
+		if fields[5] == testTaskTypeClone && opts.holdCloneTask != nil {
+			opts.holdCloneTask()
+		}
+
+		//nolint:gosec//G705 // test-only mock server; the upid is validated above before being written
+		fmt.Fprintf(writer, `{"data":{"upid":%q,"node":%q,"type":%q,"id":%q,"user":"root@pam","status":%q,"exitstatus":%q}}`,
+			upid, deployTestNode, fields[5], fields[6], taskStatusStopped, exitStatus)
 	})
 }
 
@@ -240,7 +285,7 @@ func newDeployTestGroup(t *testing.T, log hclog.Logger, opts deployTestOptions) 
 	})
 
 	mux.HandleFunc("POST "+templateRoute("clone"), func(writer http.ResponseWriter, _ *http.Request) {
-		if opts.failStep == "clone" {
+		if opts.failStep == deployTestFailStepClone {
 			http.Error(writer, "clone refused", http.StatusInternalServerError)
 
 			return
@@ -250,11 +295,11 @@ func newDeployTestGroup(t *testing.T, log hclog.Logger, opts deployTestOptions) 
 		counts.clones++
 		counts.mu.Unlock()
 
-		fmt.Fprintf(writer, `{"data":%q}`, increaseTestUPID("qmclone", deployTestCloneVMID))
+		fmt.Fprintf(writer, `{"data":%q}`, increaseTestUPID(testTaskTypeClone, deployTestCloneVMID))
 	})
 
 	mux.HandleFunc("POST "+vmRoute("status/start"), func(writer http.ResponseWriter, _ *http.Request) {
-		if opts.failStep == "start" {
+		if opts.failStep == deployTestFailStepStart {
 			http.Error(writer, "start refused", http.StatusInternalServerError)
 
 			return
@@ -264,7 +309,7 @@ func newDeployTestGroup(t *testing.T, log hclog.Logger, opts deployTestOptions) 
 	})
 
 	mux.HandleFunc("GET "+vmRoute("agent/get-osinfo"), func(writer http.ResponseWriter, _ *http.Request) {
-		if opts.failStep == "agent" {
+		if opts.failStep == deployTestFailStepAgent {
 			http.Error(writer, "agent unavailable", http.StatusInternalServerError)
 
 			return
@@ -273,32 +318,7 @@ func newDeployTestGroup(t *testing.T, log hclog.Logger, opts deployTestOptions) 
 		fmt.Fprint(writer, `{"data":{"result":{}}}`)
 	})
 
-	mux.HandleFunc("GET /nodes/"+deployTestNode+"/tasks/", func(writer http.ResponseWriter, request *http.Request) {
-		if strings.HasSuffix(request.URL.Path, "/log") {
-			fmt.Fprint(writer, `{"data":[]}`)
-
-			return
-		}
-
-		upid := strings.TrimSuffix(strings.TrimPrefix(request.URL.Path, "/nodes/"+deployTestNode+"/tasks/"), "/status")
-
-		fields := strings.Split(upid, ":")
-		if len(fields) < 8 {
-			t.Errorf("task route asked for a malformed UPID: %q", upid)
-			http.Error(writer, "malformed upid", http.StatusBadRequest)
-
-			return
-		}
-
-		exitStatus := taskExitStatusOK
-		if fields[5] == "qmclone" && opts.failStep == "clone-task" {
-			exitStatus = "TASK ERROR: out of disk space"
-		}
-
-		//nolint:gosec//G705 // test-only mock server; the upid is validated above before being written
-		fmt.Fprintf(writer, `{"data":{"upid":%q,"node":%q,"type":%q,"id":%q,"user":"root@pam","status":%q,"exitstatus":%q}}`,
-			upid, deployTestNode, fields[5], fields[6], taskStatusStopped, exitStatus)
-	})
+	registerDeployTaskRoute(t, mux, opts)
 
 	server := httptest.NewServer(mux)
 	t.Cleanup(server.Close)
@@ -349,8 +369,8 @@ func TestDeployInstanceMarksFailedInstanceForRemoval(t *testing.T) {
 		wantErrPart string
 	}{
 		{name: "resize fails", failStep: deployTestFailStepAutoresize, wantErrPart: "failed to resize disk"},
-		{name: "start fails", failStep: "start", wantErrPart: "failed to start newly deployed instance"},
-		{name: "agent never comes up", failStep: "agent", wantErrPart: "failed when waiting for qemu agent"},
+		{name: "start fails", failStep: deployTestFailStepStart, wantErrPart: "failed to start newly deployed instance"},
+		{name: "agent never comes up", failStep: deployTestFailStepAgent, wantErrPart: "failed when waiting for qemu agent"},
 	}
 
 	for _, step := range steps {
@@ -393,7 +413,7 @@ func TestDeployInstanceCloneFailureLeavesNoInstanceBehind(t *testing.T) {
 		t.Parallel()
 
 		log, _ := newLogBuffer(t)
-		ig, counts := newDeployTestGroup(t, log, deployTestOptions{failStep: "clone"})
+		ig, counts := newDeployTestGroup(t, log, deployTestOptions{failStep: deployTestFailStepClone})
 
 		template := deployTestTemplate(t, ig)
 
@@ -408,7 +428,7 @@ func TestDeployInstanceCloneFailureLeavesNoInstanceBehind(t *testing.T) {
 		t.Parallel()
 
 		log, _ := newLogBuffer(t)
-		ig, counts := newDeployTestGroup(t, log, deployTestOptions{failStep: "clone-task"})
+		ig, counts := newDeployTestGroup(t, log, deployTestOptions{failStep: deployTestFailStepCloneTask})
 
 		template := deployTestTemplate(t, ig)
 
@@ -444,6 +464,101 @@ func TestDeployInstanceSurvivesFinalRenameFailure(t *testing.T) {
 		vmOptTags: deployTestTagsCreating,
 	}, configs[0])
 	require.Regexp(t, `\[ERROR\].*failed to rename instance`, logBuf.String())
+}
+
+// The clone's VMID must be tracked from the allocation until the deployment returns, whatever
+// the outcome: while it is tracked, the collector's stale sweep must not mark the still-
+// creating instance for removal.
+func TestDeployInstanceTracksTheClonedVMID(t *testing.T) {
+	t.Parallel()
+
+	outcomes := []struct {
+		name     string
+		failStep string
+		wantErr  bool
+	}{
+		{name: "deploy succeeds"},
+		{name: "deploy fails", failStep: deployTestFailStepStart, wantErr: true},
+	}
+
+	for _, outcome := range outcomes {
+		t.Run(outcome.name, func(t *testing.T) {
+			t.Parallel()
+
+			log, _ := newLogBuffer(t)
+
+			release := make(chan struct{})
+
+			ig, _ := newDeployTestGroup(t, log, deployTestOptions{
+				failStep:      outcome.failStep,
+				holdCloneTask: func() { <-release },
+			})
+
+			template := deployTestTemplate(t, ig)
+
+			done := make(chan struct{})
+
+			var err error
+
+			go func() {
+				_, err = ig.deployInstance(context.Background(), template)
+
+				close(done)
+			}()
+
+			require.Eventually(t, func() bool {
+				return ig.isDeploying(deployTestCloneVMID)
+			}, 2*time.Second, 10*time.Millisecond,
+				"the clone was never tracked for the collector's stale sweep")
+
+			close(release)
+
+			<-done
+
+			if outcome.wantErr {
+				require.Error(t, err)
+			} else {
+				require.NoError(t, err)
+			}
+
+			require.False(t, ig.isDeploying(deployTestCloneVMID),
+				"the deployment is done: the VMID must no longer be tracked")
+		})
+	}
+}
+
+// A deployment that fails and whose rename to removing fails too leaves the instance under
+// the creating name: the collector's stale sweep must pick it up in a later round and mark it
+// for removal, without waiting for a restart.
+func TestCollectorMarksOrphanLeftByFailedDeploy(t *testing.T) {
+	t.Parallel()
+
+	log, _ := newLogBuffer(t)
+
+	failRename := 1
+
+	ig, counts := newDeployTestGroup(t, log, deployTestOptions{
+		failStep:         deployTestFailStepStart,
+		configFailOnCall: &failRename,
+	})
+
+	template := deployTestTemplate(t, ig)
+
+	vmid, err := ig.deployInstance(context.Background(), template)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "marked for removal")
+	require.Equal(t, deployTestCloneVMID, vmid)
+
+	require.False(t, ig.isDeploying(vmid), "the failed deployment must not keep its VMID tracked")
+
+	ig.collectRemovedInstances()
+
+	configs := counts.allConfigs()
+	require.Len(t, configs, 2, "the collector must have renamed the orphan: %v", configs)
+	require.Equal(t, map[string]any{
+		vmOptName: DefaultInstanceNameRemoving,
+		vmOptTags: "template-tag,fleeting-removing",
+	}, configs[1])
 }
 
 // A failure writing the creating tags is reported before the rename, so no rename happens:
