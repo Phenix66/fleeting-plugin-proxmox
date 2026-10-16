@@ -150,6 +150,10 @@ type removalTestServer struct {
 	// in-flight count is reported through stopStatusConcurrency.
 	stopStatusBlock       <-chan struct{}
 	stopStatusConcurrency *atomic.Int64
+
+	// stopStatusHold, when non-nil, is called synchronously before each qmstop /status poll
+	// is answered, so a test can hold specific polls for a controlled duration.
+	stopStatusHold func()
 }
 
 // removalTestMember is one VM in the fake's pool. It appears in the pool listing and, under its
@@ -301,15 +305,22 @@ func removalTestTaskStatus(t *testing.T, opts removalTestServer, memberByVMID ma
 		// rename's status would turn it into one.
 		switch {
 		case strings.Contains(request.URL.Path, ":qmstop:"):
-			if member, ok := memberByVMID[upidVMID(request.URL.Path)]; ok && member.stopFails {
+			member, _ := memberByVMID[upidVMID(request.URL.Path)]
+
+			switch {
+			case member.stopFails:
 				fmt.Fprint(writer, taskStatusBody("qmstop", taskStatusStopped, "TASK ERROR: VM is locked (clone)"))
-			} else if opts.stopStatusBlock != nil {
+			case opts.stopStatusHold != nil:
+				opts.stopStatusHold()
+
+				stopTask(writer, request)
+			case opts.stopStatusBlock != nil:
 				opts.stopStatusConcurrency.Add(1)
 				<-opts.stopStatusBlock
 				opts.stopStatusConcurrency.Add(-1)
 
 				stopTask(writer, request)
-			} else {
+			default:
 				stopTask(writer, request)
 			}
 		case strings.Contains(request.URL.Path, ":qmdestroy:"):

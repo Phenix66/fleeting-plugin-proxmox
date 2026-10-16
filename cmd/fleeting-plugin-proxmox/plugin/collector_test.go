@@ -227,6 +227,67 @@ func TestCollectRemovedInstancesCapsConcurrency(t *testing.T) {
 	}
 }
 
+// A member that starts in a later wave of the batch cap must still get the full per-member
+// budget for its stop and delete: wave one is held just under the budget, then wave two is
+// held past the point a deadline shared by the whole round would have expired.
+func TestCollectRemovedInstancesLateWaveKeepsFullBudget(t *testing.T) {
+	t.Parallel()
+
+	const (
+		memberBudget  = time.Second
+		firstWaveHold = 400 * time.Millisecond
+		lateWaveHold  = 700 * time.Millisecond
+	)
+
+	members := make([]removalTestMember, 0, 2*maxParallelInstanceOperations+1)
+
+	for vmid := range 2*maxParallelInstanceOperations + 1 {
+		members = append(members, removalTestMember{
+			vmid: uint64(100 + vmid),
+			name: DefaultInstanceNameRemoving,
+		})
+	}
+
+	// Wave one's polls arrive first and are held until firstWaveHold; every later poll is
+	// held for lateWaveHold, past firstWaveHold + memberBudget - firstWaveHold, the moment a
+	// round-shared deadline started with the round would have expired.
+	start := time.Now()
+
+	counts := &removalRequestCounts{}
+
+	ig := newRemovalTestGroup(t, removalTestServer{
+		members:  members,
+		requests: counts,
+		stopStatusHold: func() {
+			if elapsed := time.Since(start); elapsed < firstWaveHold {
+				time.Sleep(firstWaveHold - elapsed)
+			} else {
+				time.Sleep(lateWaveHold)
+			}
+		},
+	})
+
+	ig.collectionMemberTimeout = memberBudget
+
+	done := make(chan struct{})
+
+	go func() {
+		ig.collectRemovedInstances()
+		close(done)
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(30 * time.Second):
+		t.Fatal("the collection round did not finish")
+	}
+
+	for _, member := range members {
+		require.True(t, counts.requested(member.vmid, http.MethodDelete, ""),
+			"vm %d was not deleted: %v", member.vmid, counts.requestsFor(member.vmid))
+	}
+}
+
 func TestCollectRemovedInstancesPoolFetchFailure(t *testing.T) {
 	t.Parallel()
 

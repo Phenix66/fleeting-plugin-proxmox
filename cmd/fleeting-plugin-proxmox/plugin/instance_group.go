@@ -76,6 +76,10 @@ type InstanceGroup struct {
 	// means defaultCollectionTriggerWait. Per-instance for the same test reason.
 	collectionTriggerWait time.Duration `json:"-"`
 
+	// collectionMemberTimeout bounds one member's stop and delete in a collection round;
+	// zero means collectionTimeout. Per-instance for the same test reason.
+	collectionMemberTimeout time.Duration `json:"-"`
+
 	// deployedVMLookupWindow caps how long the post-clone lookup retries while Proxmox's
 	// listings lag the finished clone task; zero means proxmoxDeployedVMLookupWindow.
 	// Per-instance so a test can shorten it on its own group without touching shared state.
