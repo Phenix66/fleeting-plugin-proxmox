@@ -9,8 +9,13 @@ import (
 )
 
 const (
-	collectionInterval           = 1 * time.Minute
-	collectionTimeout            = 5 * time.Minute
+	collectionInterval = 1 * time.Minute
+
+	// collectionTimeout bounds one member's stop and delete within a collection round. The
+	// round keeps no shared deadline of its own (see collectRemovedInstances); memberTimeout
+	// exposes the bound per group so a test can shorten it.
+	collectionTimeout = 5 * time.Minute
+
 	collectionLockPoll           = 500 * time.Millisecond
 	defaultCollectionLockWait    = 10 * time.Second
 	defaultCollectionTriggerWait = 10 * time.Second
@@ -43,8 +48,11 @@ func (ig *InstanceGroup) runRemovedInstanceCollector() {
 }
 
 func (ig *InstanceGroup) collectRemovedInstances() {
-	ctx, cancel := context.WithTimeout(context.Background(), collectionTimeout)
-	defer cancel()
+	// The round keeps no deadline of its own: one clock shared by every member would starve
+	// the later waves of the capped batch, whose members would inherit a budget the earlier
+	// waves had already spent. Each member gets the full memberTimeout on a context of its
+	// own instead, and the round is bounded by the batch cap times that budget.
+	ctx := context.Background()
 
 	// The listing must not race a clone: while one is in flight, a recycled VMID is reported
 	// with its predecessor's stale name, and collecting from such a listing could stop or
@@ -91,7 +99,12 @@ func (ig *InstanceGroup) collectRemovedInstances() {
 	// connection and one task poller per member whatever the pool's size. collectInstance
 	// logs each member's own failure, so the batch's slots stay nil.
 	runParallel(len(members), func(index int) error {
-		ig.collectInstance(ctx, members[index])
+		// A fresh budget per member: a member that starts in a later wave gets the same
+		// memberTimeout the first wave did, and no other member can spend it.
+		mctx, cancel := context.WithTimeout(ctx, ig.memberTimeout())
+		defer cancel()
+
+		ig.collectInstance(mctx, members[index])
 
 		return nil
 	})
@@ -120,10 +133,22 @@ func (ig *InstanceGroup) triggerWait() time.Duration {
 	return defaultCollectionTriggerWait
 }
 
+// memberTimeout bounds one member's stop and delete within a collection round. A member that
+// starts in a later wave of the batch cap gets the full budget: the round keeps no shared
+// deadline, so the earlier waves cannot spend it. A per-group override wins over the default
+// so a test can shorten it on its own group.
+func (ig *InstanceGroup) memberTimeout() time.Duration {
+	if ig.collectionMemberTimeout > 0 {
+		return ig.collectionMemberTimeout
+	}
+
+	return collectionTimeout
+}
+
 // lockInstanceCloning acquires the cloning lock for the duration of one pool listing, giving
-// up after the shorter of lockWait and the round's context deadline. A false second return
-// means a clone is in flight and the caller must skip its round: a listing taken under a
-// held lock is precisely the stale one the lock exists to prevent.
+// up after the shorter of lockWait and the caller's context deadline, if any. A false second
+// return means a clone is in flight and the caller must skip its round: a listing taken under
+// a held lock is precisely the stale one the lock exists to prevent.
 func (ig *InstanceGroup) lockInstanceCloning(ctx context.Context) (func(), bool) {
 	waitFor := ig.lockWait()
 
@@ -172,7 +197,7 @@ func (ig *InstanceGroup) collectInstance(ctx context.Context, member proxmox.Clu
 	if vm.Status == "running" {
 		task, err := vm.Stop(ctx)
 		if err == nil {
-			err = ig.waitTask(ctx, task, collectionTimeout)
+			err = ig.waitTask(ctx, task, ig.memberTimeout())
 		}
 
 		if err != nil {
@@ -191,7 +216,7 @@ func (ig *InstanceGroup) collectInstance(ctx context.Context, member proxmox.Clu
 
 	task, err := vm.Delete(ctx, nil)
 	if err == nil {
-		err = ig.waitTask(ctx, task, collectionTimeout)
+		err = ig.waitTask(ctx, task, ig.memberTimeout())
 	}
 
 	if err != nil {
