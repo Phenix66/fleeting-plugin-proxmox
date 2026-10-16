@@ -433,7 +433,7 @@ func newIncreaseTestGroup(t *testing.T, log hclog.Logger) (*InstanceGroup, *incr
 			return
 		}
 
-		fmt.Fprintf(writer, `{"data":%q}`, increaseTestUPID("qmclone", cloneOptions.NewID))
+		fmt.Fprintf(writer, `{"data":%q}`, increaseTestUPID(testTaskTypeClone, cloneOptions.NewID))
 	})
 
 	// Every task the fake hands out succeeded; the batch's one failure is the refused clone,
@@ -824,7 +824,7 @@ func TestIncreaseReleasesCloningMutexWhileCloneTaskRuns(t *testing.T) {
 	mux.HandleFunc("POST "+templateRoute("clone"), func(writer http.ResponseWriter, _ *http.Request) {
 		close(cloneAccepted)
 
-		fmt.Fprintf(writer, `{"data":%q}`, increaseTestUPID("qmclone", cloneVMID))
+		fmt.Fprintf(writer, `{"data":%q}`, increaseTestUPID(testTaskTypeClone, cloneVMID))
 	})
 
 	// The clone task stays running until the test releases it, so Increase sits in its task
@@ -842,7 +842,7 @@ func TestIncreaseReleasesCloningMutexWhileCloneTaskRuns(t *testing.T) {
 
 		status := taskStatusStopped
 
-		if fields[5] == "qmclone" {
+		if fields[5] == testTaskTypeClone {
 			cloneStatusPings.Add(1)
 			<-taskUnblock
 		}

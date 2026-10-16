@@ -146,6 +146,41 @@ func TestCollectRemovedInstances(t *testing.T) {
 	require.Empty(t, counts.requestsFor(103), "a non-VM pool member was touched")
 }
 
+// A creating instance with no deployment in flight is an orphan a failed deployment left: the
+// round marks it for removal and wakes the collector for the round that deletes it. One a
+// deployment is working on is creating by design: the round leaves it untouched. Removing
+// members are collected either way.
+func TestCollectRemovedInstancesMarksOrphanedCreatingInstances(t *testing.T) {
+	t.Parallel()
+
+	counts := &removalRequestCounts{}
+
+	ig := newRemovalTestGroup(t, removalTestServer{
+		members: []removalTestMember{
+			{vmid: 100, name: DefaultInstanceNameRemoving},
+			{vmid: 101, name: DefaultInstanceNameCreating},
+			{vmid: 102, name: DefaultInstanceNameCreating},
+		},
+		requests: counts,
+	})
+
+	// vmid 102 is a deployment in flight: creating by design until its deployment renames it.
+	ig.trackDeploying(102)
+
+	ig.collectRemovedInstances()
+
+	require.True(t, counts.requested(101, http.MethodPost, "/config"),
+		"the orphaned creating instance was not marked for removal: %v", counts.requestsFor(101))
+
+	require.Empty(t, counts.requestsFor(102),
+		"the collector touched an instance a deployment is working on: %v", counts.requestsFor(102))
+
+	require.True(t, counts.requested(100, http.MethodDelete, ""),
+		"the removing instance was not deleted: %v", counts.requestsFor(100))
+
+	require.Len(t, ig.instanceCollectionTrigger, 1, "the mark must wake the collector for the round that deletes")
+}
+
 // A collection round can name as many members as the pool holds: its per-instance work must
 // run under the same batch cap as every other batch, not one goroutine per member.
 func TestCollectRemovedInstancesCapsConcurrency(t *testing.T) {
