@@ -1,6 +1,7 @@
 package plugin
 
 import (
+	"errors"
 	"strconv"
 	"strings"
 	"testing"
@@ -588,6 +589,40 @@ func TestSettings_CheckRequiredFields_fullValidation(t *testing.T) {
 
 			err := testCase.settings.CheckRequiredFields()
 			require.ErrorIs(t, err, testCase.expectedError)
+		})
+	}
+}
+
+func TestValidateInstanceCoresAndMemory(t *testing.T) {
+	t.Parallel()
+
+	zero, four := 0, 4
+
+	testCases := []struct {
+		name     string
+		settings Settings
+		wantErr  bool
+	}{
+		{name: "unset", settings: Settings{}},
+		{name: "cores and memory", settings: Settings{InstanceCores: &four, InstanceMemory: &four}},
+		{name: "zero cores", settings: Settings{InstanceCores: &zero}, wantErr: true},
+		{name: "zero memory", settings: Settings{InstanceMemory: &zero}, wantErr: true},
+	}
+
+	for _, testCase := range testCases {
+		t.Run(testCase.name, func(t *testing.T) {
+			t.Parallel()
+
+			settings := testCase.settings
+
+			err := errors.Join(settings.validateInstanceCores(), settings.validateInstanceMemory())
+			if testCase.wantErr {
+				require.ErrorIs(t, err, ErrSettingInvalidParameter)
+
+				return
+			}
+
+			require.NoError(t, err)
 		})
 	}
 }

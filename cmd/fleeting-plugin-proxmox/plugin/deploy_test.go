@@ -655,3 +655,26 @@ func TestDeployInstanceLookupStopsOnContextCancellation(t *testing.T) {
 	require.ErrorIs(t, err, context.Canceled)
 	require.Less(t, elapsed, deployedVMLookupInterval, "the cancellation was noticed only at the next attempt")
 }
+
+// instance_cores and instance_memory are written to the clone before it is started, in their
+// own config call; unset, no such call is made (see TestDeployInstanceAutoresize).
+func TestDeployInstanceSetsCoresAndMemory(t *testing.T) {
+	t.Parallel()
+
+	log, _ := newLogBuffer(t)
+	ig, counts := newDeployTestGroup(t, log, deployTestOptions{})
+
+	cores, memory := 8, 12288
+	ig.InstanceCores = &cores
+	ig.InstanceMemory = &memory
+
+	template := deployTestTemplate(t, ig)
+
+	_, err := ig.deployInstance(context.Background(), template)
+	require.NoError(t, err)
+
+	configs := counts.allConfigs()
+	require.Len(t, configs, 3)
+	require.Equal(t, map[string]any{vmOptCores: float64(cores), vmOptMemory: float64(memory)}, configs[1])
+	require.Equal(t, DefaultInstanceNameRunning, configs[2][vmOptName])
+}

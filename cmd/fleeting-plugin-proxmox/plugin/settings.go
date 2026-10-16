@@ -110,6 +110,12 @@ type Settings struct {
 	// many instances as fit on the storage. Accepts the same units as instance_autoresize_size.
 	StorageReserve string `json:"storage_reserve"`
 
+	// Number of CPU cores to set on instances after cloning. If unset, the template's value is kept.
+	InstanceCores *int `json:"instance_cores,omitempty"`
+
+	// Memory, in MiB, to set on instances after cloning. If unset, the template's value is kept.
+	InstanceMemory *int `json:"instance_memory,omitempty"`
+
 	// How often should task status be queried
 	ProxmoxTaskWaitInterval *int `json:"proxmox_task_wait_interval"`
 }
@@ -153,6 +159,8 @@ func (s *Settings) CheckRequiredFields() error {
 		{"instance_autoresize_size", s.validateInstanceAutoresizeSize},
 		{"instance_autoresize_consistency", s.validateInstanceAutoresizeConsistency},
 		{"storage_reserve", s.validateStorageReserve},
+		{"instance_cores", s.validateInstanceCores},
+		{"instance_memory", s.validateInstanceMemory},
 		{"proxmox_task_wait_interval", s.validateProxmoxTaskWaitInterval},
 	}
 
@@ -314,6 +322,24 @@ func (s *Settings) validateStorageReserve() error {
 
 	if s.Storage == "" {
 		return fmt.Errorf("%w: storage must have a value when storage_reserve is set", ErrSettingInvalidParameter)
+	}
+
+	return nil
+}
+
+// validateInstanceCores checks that the core count, when set, is positive.
+func (s *Settings) validateInstanceCores() error {
+	if s.InstanceCores != nil && *s.InstanceCores <= 0 {
+		return fmt.Errorf("%w: instance_cores: must be greater than zero", ErrSettingInvalidParameter)
+	}
+
+	return nil
+}
+
+// validateInstanceMemory checks that the memory, when set, is positive.
+func (s *Settings) validateInstanceMemory() error {
+	if s.InstanceMemory != nil && *s.InstanceMemory <= 0 {
+		return fmt.Errorf("%w: instance_memory: must be greater than zero", ErrSettingInvalidParameter)
 	}
 
 	return nil

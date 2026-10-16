@@ -9,7 +9,9 @@
             "template_id": -1,
             "instance_target_node": "",
             "max_instances": 5,
-            "storage_reserve": "5G"
+            "storage_reserve": "5G",
+            "instance_cores": 4,
+            "instance_memory": 4096
         },
         "connector_config": {
             "os": "linux",

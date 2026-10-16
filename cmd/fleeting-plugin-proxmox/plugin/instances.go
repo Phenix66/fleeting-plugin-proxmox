@@ -25,6 +25,8 @@ const (
 	vmOptName   = "name"
 	vmOptTags   = "tags"
 	vmOptDigest = "digest"
+	vmOptCores  = "cores"
+	vmOptMemory = "memory"
 
 	vmTypeQEMU = "qemu"
 )
@@ -65,32 +67,7 @@ func (ig *InstanceGroup) deployInstance(ctx context.Context, template *proxmox.V
 	}
 
 	// Start, configure etc.
-	err = func() error {
-		if ig.InstanceAutoresizeSize != "" {
-			err := ig.autoresizeDisk(ctx, vm)
-			if err != nil {
-				return fmt.Errorf("failed to resize disk: %w", err)
-			}
-		}
-
-		// Start the VM
-		task, err := vm.Start(ctx)
-		if err == nil {
-			err = ig.waitTask(ctx, task, proxmoxTaskWaitTimeout)
-		}
-
-		if err != nil {
-			return fmt.Errorf("failed to start newly deployed instance: %w", err)
-		}
-
-		// Wait for agent to start
-		err = vm.WaitForAgent(ctx, int(proxmoxAgentStartTimeout/time.Second))
-		if err != nil {
-			return fmt.Errorf("failed when waiting for qemu agent to start on newly deployed instance: %w", err)
-		}
-
-		return nil
-	}()
+	err = ig.prepareInstance(ctx, vm)
 
 	newInstanceName := ig.InstanceNameRunning
 	newInstanceTags := ig.InstanceTagsRunning
@@ -120,6 +97,66 @@ func (ig *InstanceGroup) deployInstance(ctx context.Context, template *proxmox.V
 	}
 
 	return VMID, nil
+}
+
+// prepareInstance applies the configured hardware and disk size to a freshly cloned instance,
+// then starts it and waits for its agent. Any error leaves the instance to be marked for removal.
+func (ig *InstanceGroup) prepareInstance(ctx context.Context, vm *proxmox.VirtualMachine) error {
+	err := ig.configureHardware(ctx, vm)
+	if err != nil {
+		return fmt.Errorf("failed to set cores and memory: %w", err)
+	}
+
+	if ig.InstanceAutoresizeSize != "" {
+		err := ig.autoresizeDisk(ctx, vm)
+		if err != nil {
+			return fmt.Errorf("failed to resize disk: %w", err)
+		}
+	}
+
+	// Start the VM
+	task, err := vm.Start(ctx)
+	if err == nil {
+		err = ig.waitTask(ctx, task, proxmoxTaskWaitTimeout)
+	}
+
+	if err != nil {
+		return fmt.Errorf("failed to start newly deployed instance: %w", err)
+	}
+
+	// Wait for agent to start
+	err = vm.WaitForAgent(ctx, int(proxmoxAgentStartTimeout/time.Second))
+	if err != nil {
+		return fmt.Errorf("failed when waiting for qemu agent to start on newly deployed instance: %w", err)
+	}
+
+	return nil
+}
+
+// configureHardware applies instance_cores and instance_memory to a freshly cloned instance,
+// before it is started. It waits for the change to be applied, so the instance never boots with
+// the template's values instead.
+func (ig *InstanceGroup) configureHardware(ctx context.Context, vm *proxmox.VirtualMachine) error {
+	var options []proxmox.VirtualMachineOption
+
+	if ig.InstanceCores != nil {
+		options = append(options, proxmox.VirtualMachineOption{Name: vmOptCores, Value: *ig.InstanceCores})
+	}
+
+	if ig.InstanceMemory != nil {
+		options = append(options, proxmox.VirtualMachineOption{Name: vmOptMemory, Value: *ig.InstanceMemory})
+	}
+
+	if len(options) == 0 {
+		return nil
+	}
+
+	task, err := vm.Config(ctx, options...)
+	if err != nil {
+		return fmt.Errorf("config api call failed for vm id '%d': %w", vm.VMID, err)
+	}
+
+	return ig.waitTask(ctx, task, proxmoxTaskWaitTimeout)
 }
 
 // getDeployedVM fetches the VM a finished clone task produced, retrying while Proxmox's
