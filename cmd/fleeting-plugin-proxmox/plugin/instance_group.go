@@ -102,6 +102,15 @@ type InstanceGroup struct {
 	// without touching shared state.
 	workerRestartPause time.Duration `json:"-"`
 
+	// sessionTicketRefreshInterval is how often the session ticket is renewed; zero means
+	// defaultSessionTicketRefreshInterval. Per-instance for the same test reason.
+	sessionTicketRefreshInterval time.Duration `json:"-"`
+
+	// sessionTicketRefreshRetryInterval is how soon a failed session ticket refresh is
+	// retried; zero means defaultSessionTicketRefreshRetryInterval. Per-instance for the
+	// same test reason.
+	sessionTicketRefreshRetryInterval time.Duration `json:"-"`
+
 	// Trigger to shutdown collector.
 	collectorShutdownTrigger chan struct{} `json:"-"`
 
@@ -595,6 +604,26 @@ func (ig *InstanceGroup) restartPause() time.Duration {
 	}
 
 	return defaultWorkerRestartPause
+}
+
+// refreshInterval is how often the session ticket is renewed; a per-group override wins over
+// the default so a test can shorten it on its own group.
+func (ig *InstanceGroup) refreshInterval() time.Duration {
+	if ig.sessionTicketRefreshInterval > 0 {
+		return ig.sessionTicketRefreshInterval
+	}
+
+	return defaultSessionTicketRefreshInterval
+}
+
+// refreshRetryInterval is how soon a failed session ticket refresh is retried; a per-group
+// override wins over the default so a test can shorten it on its own group.
+func (ig *InstanceGroup) refreshRetryInterval() time.Duration {
+	if ig.sessionTicketRefreshRetryInterval > 0 {
+		return ig.sessionTicketRefreshRetryInterval
+	}
+
+	return defaultSessionTicketRefreshRetryInterval
 }
 
 // resetLifecycle creates the worker channels and re-arms the shutdown guard. A reset with a
