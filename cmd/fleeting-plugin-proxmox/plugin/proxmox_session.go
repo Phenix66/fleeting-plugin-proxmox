@@ -18,7 +18,7 @@ func (ig *InstanceGroup) startSessionTicketRefresher() {
 }
 
 func (ig *InstanceGroup) runSessionTicketRefresher() {
-	ig.runRecoveringLoop("session ticket refresher", func() {
+	ig.runRecoveringLoop("session ticket refresher", ig.sessionTicketRefresherShutdownTrigger, func() {
 		for {
 			select {
 			case <-ig.sessionTicketRefresherShutdownTrigger:

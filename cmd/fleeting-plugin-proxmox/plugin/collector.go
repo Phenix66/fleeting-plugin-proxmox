@@ -28,7 +28,7 @@ func (ig *InstanceGroup) startRemovedInstanceCollector() {
 }
 
 func (ig *InstanceGroup) runRemovedInstanceCollector() {
-	ig.runRecoveringLoop("removed instance collector", func() {
+	ig.runRecoveringLoop("removed instance collector", ig.collectorShutdownTrigger, func() {
 		ig.collectRemovedInstances()
 
 		for {
