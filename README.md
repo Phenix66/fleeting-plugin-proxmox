@@ -56,8 +56,9 @@ The credentials file selects the authentication method:
   and there is no ticket to refresh. Create one with
   `pveum user token add <user> --tokenid <token_id>`; the printed secret is `token_secret`.
 - **Ticket (username + password):** set `username` and `password` (with `realm` and
-  optional `otp`). The plugin exchanges them for a session ticket and renews it hourly.
-  This remains supported for backwards compatibility.
+  optional `otp`). The plugin exchanges them for a session ticket and renews it hourly;
+  after a failed renewal it retries every five minutes until the refresh succeeds. This
+  remains supported for backwards compatibility.
 
 | Parameter      | Type   | Description                        |
 | -------------- | ------ | ---------------------------------- |

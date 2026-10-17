@@ -7,8 +7,10 @@ import (
 	"net/http/httptest"
 	"os"
 	"path"
+	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	hclog "github.com/hashicorp/go-hclog"
 	"github.com/luthermonson/go-proxmox"
@@ -27,6 +29,93 @@ func TestSessionTicketRefresherStopsOnShutdown(t *testing.T) {
 	ig.startSessionTicketRefresher()
 
 	requireShutdownReturns(t, ig, "with the session ticket refresher running")
+}
+
+// A failed refresh must be retried soon rather than waiting for the next renewal: the
+// current ticket is at the end of its life when a renewal fails, so waiting out the normal
+// interval leaves it to run out in the meantime. A success returns to the normal interval.
+func TestSessionTicketRefresherRetriesAfterFailure(t *testing.T) {
+	t.Parallel()
+
+	normalInterval := 800 * time.Millisecond
+	retryInterval := 200 * time.Millisecond
+
+	failuresLeft := 2
+
+	var lock sync.Mutex
+
+	var requestTimes []time.Time
+
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		if request.Method != http.MethodPost || request.URL.Path != "/access/ticket" {
+			http.NotFound(writer, request)
+
+			return
+		}
+
+		lock.Lock()
+
+		requestTimes = append(requestTimes, time.Now())
+
+		failed := failuresLeft > 0
+
+		if failed {
+			failuresLeft--
+		}
+		lock.Unlock()
+
+		if failed {
+			http.Error(writer, "authentication failed", http.StatusUnauthorized)
+
+			return
+		}
+
+		fmt.Fprint(writer, `{"data":{"ticket":"sample-ticket","userid":"test@pve","TTL":300}}`)
+	}))
+	t.Cleanup(server.Close)
+
+	ig := newRefreshTestGroup(t, server.URL)
+	ig.sessionTicketRefreshInterval = normalInterval
+	ig.sessionTicketRefreshRetryInterval = retryInterval
+
+	t.Cleanup(func() {
+		close(ig.sessionTicketRefresherShutdownTrigger)
+		ig.sessionTicketRefresherWaitGroup.Wait()
+	})
+
+	ig.startSessionTicketRefresher()
+
+	// The sequence under test: a failed normal renewal, two failed retries, then a renewed
+	// normal interval after the success.
+	requested := func() int {
+		lock.Lock()
+		defer lock.Unlock()
+
+		return len(requestTimes)
+	}
+
+	deadline := time.Now().Add(15 * time.Second)
+
+	for requested() < 4 {
+		if time.Now().After(deadline) {
+			t.Fatalf("the refresher made %d ticket requests, want at least 4", requested())
+		}
+
+		time.Sleep(25 * time.Millisecond)
+	}
+
+	lock.Lock()
+	first, second, third, fourth := requestTimes[0], requestTimes[1], requestTimes[2], requestTimes[3]
+	lock.Unlock()
+
+	// The retries beat the normal interval: without the retry, the second renewal would be a
+	// full normal interval after the first.
+	require.Less(t, second.Sub(first), normalInterval, "the first retry waited for the normal interval")
+	require.Less(t, third.Sub(second), normalInterval, "the second retry waited for the normal interval")
+
+	// The success returns to the normal interval.
+	require.GreaterOrEqual(t, fourth.Sub(third), normalInterval-150*time.Millisecond, "the normal interval did not resume after the success")
+	require.Less(t, fourth.Sub(third), normalInterval+500*time.Millisecond, "the normal interval ran long after the success")
 }
 
 func TestRefreshSessionTicket(t *testing.T) {
@@ -93,8 +182,9 @@ func newRefreshTestGroup(t *testing.T, apiURL string) *InstanceGroup {
 	require.NoError(t, os.WriteFile(credentialsPath, []byte(`{"realm":"pve","username":"test","password":"secret"}`), 0o600))
 
 	return &InstanceGroup{
-		CredentialsFilePath: credentialsPath,
-		log:                 hclog.NewNullLogger(),
-		proxmox:             proxmox.NewClient(apiURL),
+		CredentialsFilePath:                   credentialsPath,
+		log:                                   hclog.NewNullLogger(),
+		proxmox:                               proxmox.NewClient(apiURL),
+		sessionTicketRefresherShutdownTrigger: make(chan struct{}),
 	}
 }
