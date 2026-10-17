@@ -225,6 +225,115 @@ func TestInstanceGroup_waitTaskTimeoutFiresBetweenPolls(t *testing.T) {
 	require.Less(t, elapsed, 750*time.Millisecond, "the timeout was noticed only at the next poll")
 }
 
+// wedgedTaskServer answers by holding every request until its context ends or the hold
+// expires, the way a wedged API that never responds does. The expiry keeps a test that fails
+// while a poll is still held from blocking forever in server.Close.
+func wedgedTaskServer(t *testing.T) *httptest.Server {
+	t.Helper()
+
+	return httptest.NewServer(http.HandlerFunc(func(_ http.ResponseWriter, request *http.Request) {
+		select {
+		case <-request.Context().Done():
+		case <-time.After(10 * time.Second):
+		}
+	}))
+}
+
+// A poll blocked on a wedged API must be interrupted by the wait's timeout, not merely
+// noticed between polls: the timeout is a deadline on the wait's context, so it cancels the
+// in-flight poll instead of the poll outliving it until the client's request timeout.
+func TestInstanceGroup_waitTaskTimeoutInterruptsBlockedPoll(t *testing.T) {
+	t.Parallel()
+
+	server := wedgedTaskServer(t)
+	defer server.Close()
+
+	task := proxmox.NewTask(testTaskUPID(), proxmox.NewClient(server.URL))
+
+	start := time.Now()
+
+	done := make(chan error, 1)
+
+	go func() {
+		done <- newWaitTestGroup().waitTask(context.Background(), task, 200*time.Millisecond)
+	}()
+
+	var err error
+
+	select {
+	case err = <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the wait's timeout did not interrupt the blocked poll")
+	}
+
+	elapsed := time.Since(start)
+
+	require.ErrorIs(t, err, proxmox.ErrTimeout, "the blocked poll outlived the wait's timeout")
+	require.Contains(t, err.Error(), "the task wait timed out")
+	require.Less(t, elapsed, time.Second, "the timeout was noticed long after it elapsed")
+}
+
+// A caller's cancellation must interrupt a poll blocked on a wedged API the moment it fires,
+// and be reported as the cancellation, not as a poll failure.
+func TestInstanceGroup_waitTaskCancellationInterruptsBlockedPoll(t *testing.T) {
+	t.Parallel()
+
+	server := wedgedTaskServer(t)
+	defer server.Close()
+
+	task := proxmox.NewTask(testTaskUPID(), proxmox.NewClient(server.URL))
+
+	ctx, cancel := context.WithCancel(context.Background())
+
+	go func() {
+		time.Sleep(150 * time.Millisecond)
+
+		cancel()
+	}()
+
+	start := time.Now()
+
+	done := make(chan error, 1)
+
+	go func() {
+		done <- newWaitTestGroup().waitTask(ctx, task, time.Minute)
+	}()
+
+	var err error
+
+	select {
+	case err = <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the cancellation did not interrupt the blocked poll")
+	}
+
+	elapsed := time.Since(start)
+
+	require.ErrorIs(t, err, context.Canceled)
+	require.Contains(t, err.Error(), "cancelled while waiting for the task")
+	require.Less(t, elapsed, time.Second, "the cancellation was noticed long after it fired")
+}
+
+// The caller's own deadline is earlier than the wait's timeout: when it fires, the wait ends
+// as the caller's cancellation, not as the wait's timeout of its own.
+func TestInstanceGroup_waitTaskCallerDeadlineIsCancellation(t *testing.T) {
+	t.Parallel()
+
+	server := httptest.NewServer(taskHandler(t, testTaskTypeClone, "running", "", ""))
+	defer server.Close()
+
+	task := proxmox.NewTask(testTaskUPID(), proxmox.NewClient(server.URL))
+
+	ctx, cancel := context.WithTimeout(context.Background(), 150*time.Millisecond)
+	defer cancel()
+
+	err := newWaitTestGroup().waitTask(ctx, task, time.Minute)
+
+	require.ErrorIs(t, err, context.DeadlineExceeded)
+	require.Contains(t, err.Error(), "cancelled while waiting for the task")
+	require.NotContains(t, err.Error(), "the task wait timed out")
+}
+
 // A poll whose response carries no status field is never trusted as success, and a task that
 // was never observed as stopped has no log to fetch.
 func TestInstanceGroup_waitTaskBlankStatusDoesNotFetchLog(t *testing.T) {

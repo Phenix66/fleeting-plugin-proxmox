@@ -92,13 +92,26 @@ func (ig *InstanceGroup) waitTask(ctx context.Context, task *proxmox.Task, timeo
 // waitTaskStopped polls the task's status until it is no longer reported as running. It is
 // the plugin's own loop rather than proxmox.Task.Wait because Wait sleeps for a whole
 // interval between checks, so a cancelled context or an elapsed timeout is noticed only at
-// the next poll -- up to a full interval. Here the context, the timeout, and the poll tick
-// are three channels in one select, so each is observed the moment it fires.
+// the next poll -- up to a full interval. Here the timeout is a deadline on the wait's own
+// context: the context and the poll tick are two channels in one select, so each is observed
+// the moment it fires, and a poll still in flight when either fires is interrupted by it
+// instead of outliving it until the client's request timeout.
 func waitTaskStopped(ctx context.Context, task *proxmox.Task, interval, timeout time.Duration) error {
+	parentDeadline, hasParentDeadline := ctx.Deadline()
+
+	ctx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+
+	// This wait owns the deadline when it is earlier than the caller's (or the caller has
+	// none); then a DeadlineExceeded is this wait's timeout, and the caller's own deadline
+	// is still reported as a cancellation, as before.
+	waitDeadline, _ := ctx.Deadline()
+	ownsDeadline := !hasParentDeadline || parentDeadline.After(waitDeadline)
+
 	// The first ping populates the status fields the outcome classification reads.
-	err := task.Ping(ctx)
+	err := pollTask(ctx, task, ownsDeadline)
 	if err != nil {
-		return fmt.Errorf("task poll failed: %w", err)
+		return err
 	}
 
 	if task.Status != proxmox.TaskRunning {
@@ -108,18 +121,14 @@ func waitTaskStopped(ctx context.Context, task *proxmox.Task, interval, timeout 
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 
-	deadline := time.After(timeout)
-
 	for {
 		select {
 		case <-ctx.Done():
-			return fmt.Errorf("cancelled while waiting for the task: %w", ctx.Err())
-		case <-deadline:
-			return fmt.Errorf("the task wait timed out: %w", proxmox.ErrTimeout)
+			return ctxEndError(ownsDeadline, ctx.Err())
 		case <-ticker.C:
-			err := task.Ping(ctx)
+			err := pollTask(ctx, task, ownsDeadline)
 			if err != nil {
-				return fmt.Errorf("task poll failed: %w", err)
+				return err
 			}
 
 			if task.Status != proxmox.TaskRunning {
@@ -127,6 +136,33 @@ func waitTaskStopped(ctx context.Context, task *proxmox.Task, interval, timeout 
 			}
 		}
 	}
+}
+
+// pollTask pings the task once. A poll that fails because the context ended while the poll
+// was in flight carries the context's verdict -- the wait's timeout, or the caller's
+// cancellation -- not a bare poll failure.
+func pollTask(ctx context.Context, task *proxmox.Task, ownsDeadline bool) error {
+	err := task.Ping(ctx)
+	if err == nil {
+		return nil
+	}
+
+	ctxErr := ctx.Err()
+	if ctxErr != nil {
+		return ctxEndError(ownsDeadline, ctxErr)
+	}
+
+	return fmt.Errorf("task poll failed: %w", err)
+}
+
+// ctxEndError reports a context that ended the wait: the wait's own timeout when the wait
+// owns the deadline, the caller's cancellation otherwise.
+func ctxEndError(ownsDeadline bool, ctxErr error) error {
+	if errors.Is(ctxErr, context.DeadlineExceeded) && ownsDeadline {
+		return fmt.Errorf("the task wait timed out: %w", proxmox.ErrTimeout)
+	}
+
+	return fmt.Errorf("cancelled while waiting for the task: %w", ctxErr)
 }
 
 // taskLog returns the first page of a task's log in order. task.ExitStatus already carries
