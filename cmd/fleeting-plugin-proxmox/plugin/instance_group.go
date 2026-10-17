@@ -33,6 +33,11 @@ const (
 	networkCheckTimeout = 5 * time.Second
 	networkCheckRetries = 12
 
+	// defaultWorkerRestartPause bounds how long a panicked worker waits before its loop
+	// restarts: long enough for a transient wedge -- a stuck API call, a wedged listing -- to
+	// clear, and a ceiling on the rate a deterministic panic can log.
+	defaultWorkerRestartPause = 1 * time.Minute
+
 	// maxParallelInstanceOperations bounds how many operations one batch runs at once. A batch
 	// is as large as the pool -- every Increase, every mark-for-removal sweep, every resume
 	// or suspend -- and an unbounded fan-out would open one HTTP connection and one task
@@ -91,6 +96,11 @@ type InstanceGroup struct {
 	// only the deployment may rename it.
 	deployingMu sync.Mutex       `json:"-"`
 	deploying   map[int]struct{} `json:"-"`
+
+	// workerRestartPause bounds the pause before a panicked worker loop restarts; zero means
+	// defaultWorkerRestartPause. Per-instance so a test can shorten it on its own group
+	// without touching shared state.
+	workerRestartPause time.Duration `json:"-"`
 
 	// Trigger to shutdown collector.
 	collectorShutdownTrigger chan struct{} `json:"-"`
@@ -542,17 +552,49 @@ func suspendResumeOutcome(instances []string, errs []error, sentinel error) ([]s
 	return succeeded, nil
 }
 
-// runRecoveringLoop runs a background worker loop, and a panic in it -- the vendor client
-// can index past the end of a malformed UPID -- is logged instead of taking the plugin
-// process down. The loop does not restart: a dead worker stays dead, and the log says why.
-func (ig *InstanceGroup) runRecoveringLoop(worker string, loop func()) {
-	defer func() {
-		if recovered := recover(); recovered != nil {
-			ig.log.Error(worker+" loop panicked and will not restart", "err", panicError(recovered))
-		}
-	}()
+// runRecoveringLoop runs a background worker loop for the life of the lifecycle. A panic in
+// the loop -- the vendor client can index past the end of a malformed UPID -- is logged and
+// the loop is restarted after a bounded pause, so one panic cannot leave the worker dead for
+// the rest of the run: a dead collector stops every removal and every stale sweep, and a dead
+// refresher every ticket refresh. A deterministic panic then repeats at the pause's rate --
+// the log keeps saying why -- and the pause waits out the stop trigger first, so a shutdown
+// is never held by it.
+func (ig *InstanceGroup) runRecoveringLoop(worker string, stop <-chan struct{}, loop func()) {
+	for {
+		panicked := false
 
-	loop()
+		func() {
+			defer func() {
+				if recovered := recover(); recovered != nil {
+					panicked = true
+
+					ig.log.Error(worker+" loop panicked, restarting", "err", panicError(recovered))
+				}
+			}()
+
+			loop()
+		}()
+
+		if !panicked {
+			return
+		}
+
+		select {
+		case <-stop:
+			return
+		case <-time.After(ig.restartPause()):
+		}
+	}
+}
+
+// restartPause bounds the pause before a panicked worker loop restarts; a per-group override
+// wins over the default so a test can shorten it on its own group.
+func (ig *InstanceGroup) restartPause() time.Duration {
+	if ig.workerRestartPause > 0 {
+		return ig.workerRestartPause
+	}
+
+	return defaultWorkerRestartPause
 }
 
 // resetLifecycle creates the worker channels and re-arms the shutdown guard. A reset with a

@@ -134,28 +134,85 @@ func TestRunParallelCapsConcurrency(t *testing.T) {
 }
 
 // A worker loop that panics -- the vendor client can index past the end of a malformed UPID
-// -- must log and return instead of taking the plugin process down.
-func TestRunRecoveringLoopRecoversPanic(t *testing.T) {
+// -- must log and restart instead of taking the plugin process down or staying dead: a dead
+// collector stops every removal, a dead refresher every ticket refresh.
+func TestRunRecoveringLoopRestartsAfterPanic(t *testing.T) {
 	t.Parallel()
 
 	log, logBuf := newLogBuffer(t)
 
 	ig := &InstanceGroup{log: log}
+	ig.workerRestartPause = 10 * time.Millisecond
+
+	stop := make(chan struct{})
+
+	var passes atomic.Int32
 
 	done := make(chan struct{})
 
 	go func() {
-		ig.runRecoveringLoop("test worker", func() {
+		ig.runRecoveringLoop("test worker", stop, func() {
+			passes.Add(1)
+
+			if passes.Load() <= 2 {
+				panic("boom")
+			}
+
+			<-stop
+		})
+		close(done)
+	}()
+
+	require.Eventually(t, func() bool {
+		return passes.Load() >= 3
+	}, 2*time.Second, time.Millisecond, "the loop did not restart after the panics")
+
+	close(stop)
+
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("runRecoveringLoop did not return after the stop")
+	}
+
+	require.Equal(t, int32(3), passes.Load())
+	require.Regexp(t, `\[ERROR\].*test worker loop panicked, restarting`, logBuf.String())
+}
+
+// A panic while the loop is restarting must not hold a shutdown: the stop trigger wins the
+// restart pause, so the worker exits at once instead of sitting the pause out.
+func TestRunRecoveringLoopStopWinsRestartPause(t *testing.T) {
+	t.Parallel()
+
+	log, _ := newLogBuffer(t)
+
+	ig := &InstanceGroup{log: log}
+	ig.workerRestartPause = time.Hour // a pause no test should have to sit out
+
+	stop := make(chan struct{})
+
+	var passes atomic.Int32
+
+	done := make(chan struct{})
+
+	go func() {
+		ig.runRecoveringLoop("test worker", stop, func() {
+			passes.Add(1)
+
 			panic("boom")
 		})
 		close(done)
 	}()
 
+	require.Eventually(t, func() bool {
+		return passes.Load() >= 1
+	}, 2*time.Second, time.Millisecond, "the loop never started")
+
+	close(stop)
+
 	select {
 	case <-done:
-	case <-time.After(time.Second):
-		t.Fatal("runRecoveringLoop did not return after the panic")
+	case <-time.After(5 * time.Second):
+		t.Fatal("the stop trigger did not end a restarting worker")
 	}
-
-	require.Regexp(t, `\[ERROR\].*test worker loop panicked and will not restart`, logBuf.String())
 }
