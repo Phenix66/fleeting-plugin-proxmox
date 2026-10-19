@@ -38,8 +38,17 @@ func (ig *InstanceGroup) runRemovedInstanceCollector() {
 			case <-time.After(collectionInterval):
 				ig.collectRemovedInstances()
 			case <-ig.instanceCollectionTrigger:
-				// Sleep for a bit to give Proxmox a chance to propagate renames that happened before trigger
-				<-time.After(ig.triggerWait())
+				// A wake-up is a nudge, not a commitment. If shutdown was already closed when the
+				// outer select picked this branch over a closed shutdown trigger, or it closes while
+				// we wait for the rename to propagate, exit now. Without this inner check a
+				// self-refilling trigger -- every round that marks an instance re-queues a wake-up --
+				// keeps winning the outer select's random pick, and Shutdown is delayed by a whole
+				// trigger wait per round.
+				select {
+				case <-ig.collectorShutdownTrigger:
+					return
+				case <-time.After(ig.triggerWait()):
+				}
 
 				ig.collectRemovedInstances()
 			}
