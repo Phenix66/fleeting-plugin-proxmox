@@ -440,6 +440,51 @@ func TestDeployInstanceCloneFailureLeavesNoInstanceBehind(t *testing.T) {
 	})
 }
 
+// A clone task that runs longer than the configured clone wait timeout must fail the deploy
+// at that timeout.
+func TestDeployInstanceCloneWaitsOnConfiguredTimeout(t *testing.T) {
+	t.Parallel()
+
+	log, _ := newLogBuffer(t)
+
+	release := make(chan struct{})
+
+	ig, _ := newDeployTestGroup(t, log, deployTestOptions{
+		holdCloneTask: func() { <-release },
+	})
+
+	cloneTimeout := 1
+	generalTimeout := 120
+
+	ig.ProxmoxCloneWaitTimeout = &cloneTimeout
+	ig.ProxmoxTaskWaitTimeout = &generalTimeout
+
+	template := deployTestTemplate(t, ig)
+
+	start := time.Now()
+
+	done := make(chan error, 1)
+
+	go func() {
+		_, err := ig.deployInstance(context.Background(), template)
+		done <- err
+	}()
+
+	select {
+	case err := <-done:
+		elapsed := time.Since(start)
+
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "the task wait timed out")
+		require.Less(t, elapsed, 4*time.Second,
+			"the deploy outlived the configured clone wait timeout: the clone wait read the general task wait timeout")
+	case <-time.After(10 * time.Second):
+		t.Fatal("deployInstance did not return after the configured clone wait timeout")
+	}
+
+	close(release)
+}
+
 // A deploy that fully succeeded but whose final rename failed is reported as a success: the
 // instance is up and the failure is logged. It keeps the creating name, so the next Init's
 // stale sweep marks it for removal.

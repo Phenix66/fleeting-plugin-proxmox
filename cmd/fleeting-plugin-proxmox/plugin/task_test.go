@@ -53,12 +53,17 @@ func taskHandler(t *testing.T, taskType, status, exitStatus, logLine string) htt
 	}
 }
 
-// newWaitTestGroup is the minimum InstanceGroup waitTask needs: a poll interval and a logger.
+// newWaitTestGroup is the minimum InstanceGroup waitTask needs: a poll interval, task and
+// clone wait timeouts and a logger.
 func newWaitTestGroup() *InstanceGroup {
 	waitInterval := 1
+	waitTimeout := 5
+	cloneTimeout := 5
 
 	return &InstanceGroup{
 		ProxmoxTaskWaitInterval: &waitInterval,
+		ProxmoxTaskWaitTimeout:  &waitTimeout,
+		ProxmoxCloneWaitTimeout: &cloneTimeout,
 		log:                     hclog.NewNullLogger(),
 	}
 }
