@@ -963,6 +963,46 @@ func TestUpdateReportsInstanceStates(t *testing.T) {
 	}, reported)
 }
 
+// An empty listed name (Proxmox's status cache holds no fresh entry for the VM) is no evidence
+// of ownership, so Update asks the VM itself, the way Decrease does: a member whose config
+// carries one of this group's names is reported under it, a member that resolves to a foreign
+// name or to nothing is not, and a member whose fetch fails stays out of the report for this
+// cycle with a warning.
+func TestUpdateResolvesEmptyListedNames(t *testing.T) {
+	t.Parallel()
+
+	log, logBuf := newLogBuffer(t)
+
+	ig := newRemovalTestGroup(t, removalTestServer{
+		log: log,
+		members: []removalTestMember{
+			{vmid: 100, name: "", fetchedName: DefaultInstanceNameRunning},
+			{vmid: 101, name: "", fetchedName: foreignRunning},
+			{vmid: 102, name: ""},
+			{vmid: 103, name: ""},
+			{vmid: 104, name: DefaultInstanceNameCreating},
+		},
+		failPaths: []string{"/qemu/103/"},
+	})
+
+	type reportedInstance struct {
+		id    string
+		state provider.State
+	}
+
+	var reported []reportedInstance
+
+	err := ig.Update(context.Background(), func(id string, state provider.State) {
+		reported = append(reported, reportedInstance{id, state})
+	})
+	require.NoError(t, err)
+	require.Equal(t, []reportedInstance{
+		{"100", provider.StateRunning},
+		{"104", provider.StateCreating},
+	}, reported)
+	require.Regexp(t, `\[WARN\].*cannot read the name of an instance`, logBuf.String())
+}
+
 func TestUpdatePoolFetchFailure(t *testing.T) {
 	t.Parallel()
 
