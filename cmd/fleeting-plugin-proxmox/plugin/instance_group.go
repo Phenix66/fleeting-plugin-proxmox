@@ -368,6 +368,19 @@ func (ig *InstanceGroup) Update(ctx context.Context, update func(instance string
 			continue
 		}
 
+		if member.Name == "" {
+			// No name in the listing is not a foreign name: Proxmox leaves it unset while
+			// its status cache holds no fresh entry for the VM. Ask the VM itself, the way
+			// Decrease does, or the instance drops out of the report for as long as the
+			// cache stays stale.
+			nameErr := ig.nameFromNode(ctx, &member)
+			if nameErr != nil {
+				ig.log.Warn("cannot read the name of an instance, skipping it this cycle", "vmid", member.VMID, "err", nameErr)
+
+				continue
+			}
+		}
+
 		state, ok := ig.stateForName(member.Name)
 		if !ok {
 			continue // Unknown name, skipping...
