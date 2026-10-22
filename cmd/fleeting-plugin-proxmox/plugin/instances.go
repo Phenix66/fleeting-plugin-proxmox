@@ -21,6 +21,14 @@ const (
 	// deployedVMLookupInterval is the pause between post-clone lookup attempts.
 	deployedVMLookupInterval = 2 * time.Second
 
+	// cloneAbortPollInterval paces the polls of a clone task being aborted: the abort settles
+	// quickly, and a coarse poll would hold the deployment blocked for nothing.
+	cloneAbortPollInterval = 100 * time.Millisecond
+
+	// defaultCloneCheckTimeout bounds settleCloneTask's post-timeout task check and abort
+	// request; a per-group override wins over it (see InstanceGroup.cloneCheckTimeout).
+	defaultCloneCheckTimeout = 30 * time.Second
+
 	vmOptName   = "name"
 	vmOptTags   = "tags"
 	vmOptDigest = "digest"
@@ -43,6 +51,12 @@ func (ig *InstanceGroup) deployInstance(ctx context.Context, template *proxmox.V
 		ig.log.Info("Deploying new instance", "vmid", VMID)
 
 		err = ig.waitTask(ctx, task, ig.cloneWaitTimeout())
+		if errors.Is(err, proxmox.ErrTimeout) {
+			// The clone is outliving the configured wait. The task keeps running whether the
+			// deployment follows it or not, so it is settled -- checked once more, and
+			// aborted if it is still running -- instead of abandoned.
+			err = ig.settleCloneTask(ctx, task, VMID, err)
+		}
 	}
 
 	if err != nil {
@@ -226,6 +240,44 @@ func (ig *InstanceGroup) cloneTemplate(ctx context.Context, template *proxmox.Vi
 	ig.trackDeploying(VMID)
 
 	return VMID, task, nil
+}
+
+// settleCloneTask resolves a clone task the clone wait timed out on. Abandoning the task
+// would leave the half-cloned VM behind for the rest of the task's run: locked against
+// configuration, start and deletion, refusing new clones from the template in the same
+// window, and reported as a creating instance to the provisioner the whole time. Once the
+// clone finishes, the collector's stale sweep deletes the finished work and the demand is
+// re-cloned from scratch. The task is checked once more instead: it may have settled while
+// the wait did, in which case the deployment proceeds as if the wait had succeeded. A task
+// still running is aborted and the abort is waited out, so the deployment fails with the
+// cluster clean instead of leaving a locked, unpowered instance behind.
+func (ig *InstanceGroup) settleCloneTask(ctx context.Context, task *proxmox.Task, vmid int, waitErr error) error {
+	checkCtx, cancel := context.WithTimeout(ctx, ig.settleTimeout())
+	defer cancel()
+
+	err := task.Ping(checkCtx)
+	if err != nil {
+		return fmt.Errorf("%w: could not check the clone task after the timeout: %w", waitErr, err)
+	}
+
+	if task.Status != proxmox.TaskRunning {
+		return classifyTask(task.Status, task.ExitStatus)
+	}
+
+	ig.log.Warn("clone task still running after the clone wait timeout, aborting it",
+		"vmid", vmid, "upid", task.UPID)
+
+	err = task.Stop(checkCtx)
+	if err != nil {
+		return fmt.Errorf("%w: could not abort the clone task: %w", waitErr, err)
+	}
+
+	err = waitTaskStopped(ctx, task, cloneAbortPollInterval, ig.taskWaitTimeout())
+	if err != nil {
+		return fmt.Errorf("%w: the clone abort did not complete: %w", waitErr, err)
+	}
+
+	return fmt.Errorf("%w: the clone task outlived the clone wait timeout and was aborted", waitErr)
 }
 
 // trackDeploying records that a live deployInstance owns vmid, until

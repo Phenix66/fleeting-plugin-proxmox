@@ -459,6 +459,10 @@ func TestDeployInstanceCloneWaitsOnConfiguredTimeout(t *testing.T) {
 	ig.ProxmoxCloneWaitTimeout = &cloneTimeout
 	ig.ProxmoxTaskWaitTimeout = &generalTimeout
 
+	// The fake's task route is held for the whole test, so the post-timeout settlement
+	// check must give up before the assertion's deadline instead of waiting the task out.
+	ig.cloneCheckTimeout = 500 * time.Millisecond
+
 	template := deployTestTemplate(t, ig)
 
 	start := time.Now()

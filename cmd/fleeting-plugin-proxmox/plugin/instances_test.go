@@ -380,7 +380,7 @@ func removalTestVMRoute(request *http.Request, memberByVMID map[string]removalTe
 func removalTestServeStatus(writer http.ResponseWriter, matched removalTestMember) {
 	status := matched.vmStatus
 	if status == "" {
-		status = "running"
+		status = taskStatusRunning
 	}
 
 	fmt.Fprintf(writer, `{"data":{"vmid":%d,"name":%q,"status":%q}}`, matched.vmid, matched.name, status)

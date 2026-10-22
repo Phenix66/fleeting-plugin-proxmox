@@ -234,7 +234,7 @@ func (ig *InstanceGroup) collectInstance(ctx context.Context, member proxmox.Clu
 		return
 	}
 
-	if vm.Status == "running" {
+	if vm.Status == taskStatusRunning {
 		task, err := vm.Stop(ctx)
 		if err == nil {
 			err = ig.waitTask(ctx, task, ig.memberTimeout())

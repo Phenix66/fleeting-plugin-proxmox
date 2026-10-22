@@ -15,6 +15,9 @@ const (
 	// taskStatusStopped is the status Proxmox reports for a task that has finished.
 	taskStatusStopped = "stopped"
 
+	// taskStatusRunning is the status Proxmox reports for a task or VM that has not stopped.
+	taskStatusRunning = "running"
+
 	// taskExitStatusOK is the exit status Proxmox reports for a task that succeeded.
 	taskExitStatusOK = "OK"
 
@@ -63,6 +66,17 @@ func (ig *InstanceGroup) taskWaitTimeout() time.Duration {
 // operation is considered failed.
 func (ig *InstanceGroup) cloneWaitTimeout() time.Duration {
 	return time.Duration(*ig.ProxmoxCloneWaitTimeout) * time.Second
+}
+
+// settleTimeout caps how long settleCloneTask spends checking and aborting a clone task the
+// clone wait timed out on; a per-group override wins over the default so a test can shorten
+// it on its own group.
+func (ig *InstanceGroup) settleTimeout() time.Duration {
+	if ig.cloneCheckTimeout > 0 {
+		return ig.cloneCheckTimeout
+	}
+
+	return defaultCloneCheckTimeout
 }
 
 // waitTask waits for a Proxmox task to finish and turns a non-OK exit status into an error.
