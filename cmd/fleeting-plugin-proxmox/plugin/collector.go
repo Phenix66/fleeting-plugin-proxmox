@@ -281,6 +281,11 @@ func (ig *InstanceGroup) collectInstance(ctx context.Context, member proxmox.Clu
 	}
 
 	ig.log.Info("collector removed instance", "vmid", member.VMID, "node", member.Node)
+
+	// The VMID is free again, and Proxmox hands the lowest free one to the next clone: keep it
+	// from new clones until the provisioner has seen this instance disappear.
+	//nolint:gosec//G115 // member.VMID is a Proxmox VMID, which always fits in an int
+	ig.trackFreed(int(member.VMID))
 }
 
 // fetchToCollect fetches a listed member through getListedVM, logging a failed fetch; false

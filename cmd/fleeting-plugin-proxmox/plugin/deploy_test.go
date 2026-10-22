@@ -87,6 +87,7 @@ type deployTestCounts struct {
 	configs     []map[string]any
 	resizes     []map[string]any
 	clones      int
+	cloneNewIDs []float64
 	poolsServed atomic.Int64
 }
 
@@ -339,15 +340,18 @@ func newDeployTestGroup(t *testing.T, log hclog.Logger, opts deployTestOptions) 
 
 	registerDeployResizeRoute(t, mux, opts, counts, disk)
 
-	mux.HandleFunc("POST "+templateRoute("clone"), func(writer http.ResponseWriter, _ *http.Request) {
+	mux.HandleFunc("POST "+templateRoute("clone"), func(writer http.ResponseWriter, request *http.Request) {
 		if opts.failStep == deployTestFailStepClone {
 			http.Error(writer, "clone refused", http.StatusInternalServerError)
 
 			return
 		}
 
+		newID, _ := decodeDeployTestBody(t, request)["newid"].(float64)
+
 		counts.mu.Lock()
 		counts.clones++
+		counts.cloneNewIDs = append(counts.cloneNewIDs, newID)
 		counts.mu.Unlock()
 
 		fmt.Fprintf(writer, `{"data":%q}`, increaseTestUPID(testTaskTypeClone, deployTestCloneVMID))

@@ -144,6 +144,12 @@ type InstanceGroup struct {
 	// Increase clones fewer instances than requested for lack of storage space.
 	storageFullLogMu    sync.Mutex `json:"-"`
 	storageFullLoggedAt time.Time  `json:"-"`
+
+	// freedMu guards freed: when the collector deleted each VMID, so cloneTemplate keeps it
+	// from new clones for freedVMIDQuarantine; see trackFreed. Unlike deploying it survives a
+	// re-Init: the provisioner that must see the VMID disappear outlives the lifecycle.
+	freedMu sync.Mutex        `json:"-"`
+	freed   map[int]time.Time `json:"-"`
 }
 
 // Init implements provider.InstanceGroup.

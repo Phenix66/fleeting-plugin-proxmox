@@ -141,6 +141,8 @@ func TestCollectRemovedInstances(t *testing.T) {
 
 	require.True(t, counts.requested(100, http.MethodPost, "/status/stop"), "the marked instance was not stopped: %v", counts.requestsFor(100))
 	require.True(t, counts.requested(100, http.MethodDelete, ""), "the marked instance was not deleted: %v", counts.requestsFor(100))
+	require.True(t, ig.isQuarantined(100), "the deleted instance's VMID must be kept from new clones")
+	require.False(t, ig.isQuarantined(101), "only a deleted VMID is quarantined")
 	require.Empty(t, counts.requestsFor(101), "an unmarked instance was touched")
 	require.Empty(t, counts.requestsFor(102), "another manager's instance was touched")
 	require.Empty(t, counts.requestsFor(103), "a non-VM pool member was touched")
