@@ -104,6 +104,10 @@ type InstanceGroup struct {
 	deployingMu sync.Mutex       `json:"-"`
 	deploying   map[int]struct{} `json:"-"`
 
+	// renamed, also guarded by deployingMu, holds when a deployment last renamed a VMID away
+	// from creating; see trackRenamed.
+	renamed map[int]time.Time `json:"-"`
+
 	// workerRestartPause bounds the pause before a panicked worker loop restarts; zero means
 	// defaultWorkerRestartPause. Per-instance so a test can shorten it on its own group
 	// without touching shared state.
@@ -634,6 +638,7 @@ func (ig *InstanceGroup) resetLifecycle() {
 	// ignores the map -- marks for removal.
 	ig.deployingMu.Lock()
 	ig.deploying = nil
+	ig.renamed = nil
 	ig.deployingMu.Unlock()
 
 	// Channels only exist after the first reset, and they are created together, so one
