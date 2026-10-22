@@ -90,6 +90,11 @@ type InstanceGroup struct {
 	// Per-instance so a test can shorten it on its own group without touching shared state.
 	deployedVMLookupWindow time.Duration `json:"-"`
 
+	// cloneCheckTimeout caps settleCloneTask's post-timeout task check and abort request;
+	// zero means defaultCloneCheckTimeout. Per-instance so a test can shorten it on its own
+	// group without touching shared state.
+	cloneCheckTimeout time.Duration `json:"-"`
+
 	// deployingMu guards deploying: the VMIDs a live deployInstance is working on, from the
 	// clone's VMID allocation until the deployment renames the instance away from creating.
 	// The collector's stale sweep skips them: a deploying instance is creating by design, and
