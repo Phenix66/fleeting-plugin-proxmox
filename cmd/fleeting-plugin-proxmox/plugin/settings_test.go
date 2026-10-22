@@ -24,6 +24,8 @@ var (
 	sampleAutoresizeDisk          = "ide0"
 	sampleAutoresizeSize          = "10G"
 	sampleProxmoxTaskWaitInterval = 5
+	sampleProxmoxTaskWaitTimeout  = 600
+	sampleProxmoxCloneWaitTimeout = 1800
 )
 
 func TestSettings_fillWithDefaults(t *testing.T) {
@@ -39,6 +41,8 @@ func TestSettings_fillWithDefaults(t *testing.T) {
 	require.Equal(t, "fleeting-removing", settings.InstanceNameRemoving)
 	require.Equal(t, "ipv4", settings.InstanceNetworkProtocol)
 	require.Equal(t, 2, *settings.ProxmoxTaskWaitInterval)
+	require.Equal(t, 300, *settings.ProxmoxTaskWaitTimeout)
+	require.Equal(t, 900, *settings.ProxmoxCloneWaitTimeout)
 
 	settings2 := Settings{
 		InstanceNameCreating: sampleInstanceNameCreating,
@@ -57,6 +61,8 @@ func TestSettings_checkRequiredFields(t *testing.T) {
 
 	zeroInterval := 0
 	negativeInterval := -1
+	zeroTimeout := 0
+	negativeTimeout := -1
 
 	tests := []struct {
 		name          string
@@ -232,6 +238,85 @@ func TestSettings_checkRequiredFields(t *testing.T) {
 				TemplateID:              &sampleTemplateID,
 				MaxInstances:            &sampleMaxInstances,
 				ProxmoxTaskWaitInterval: &sampleProxmoxTaskWaitInterval,
+			},
+			expectedError: nil,
+		},
+		{
+			// A zero timeout would fail every task wait the moment it started.
+			name: "Zero task wait timeout",
+			settings: Settings{
+				URL:                    sampleURL,
+				CredentialsFilePath:    sampleCredentialsPath,
+				Pool:                   samplePool,
+				Storage:                sampleStorage,
+				TemplateID:             &sampleTemplateID,
+				MaxInstances:           &sampleMaxInstances,
+				ProxmoxTaskWaitTimeout: &zeroTimeout,
+			},
+			expectedError: ErrSettingInvalidParameter,
+		},
+		{
+			name: "Negative task wait timeout",
+			settings: Settings{
+				URL:                    sampleURL,
+				CredentialsFilePath:    sampleCredentialsPath,
+				Pool:                   samplePool,
+				Storage:                sampleStorage,
+				TemplateID:             &sampleTemplateID,
+				MaxInstances:           &sampleMaxInstances,
+				ProxmoxTaskWaitTimeout: &negativeTimeout,
+			},
+			expectedError: ErrSettingInvalidParameter,
+		},
+		{
+			name: "Valid task wait timeout",
+			settings: Settings{
+				URL:                    sampleURL,
+				CredentialsFilePath:    sampleCredentialsPath,
+				Pool:                   samplePool,
+				Storage:                sampleStorage,
+				TemplateID:             &sampleTemplateID,
+				MaxInstances:           &sampleMaxInstances,
+				ProxmoxTaskWaitTimeout: &sampleProxmoxTaskWaitTimeout,
+			},
+			expectedError: nil,
+		},
+		{
+			name: "Zero clone wait timeout",
+			settings: Settings{
+				URL:                     sampleURL,
+				CredentialsFilePath:     sampleCredentialsPath,
+				Pool:                    samplePool,
+				Storage:                 sampleStorage,
+				TemplateID:              &sampleTemplateID,
+				MaxInstances:            &sampleMaxInstances,
+				ProxmoxCloneWaitTimeout: &zeroTimeout,
+			},
+			expectedError: ErrSettingInvalidParameter,
+		},
+		{
+			name: "Negative clone wait timeout",
+			settings: Settings{
+				URL:                     sampleURL,
+				CredentialsFilePath:     sampleCredentialsPath,
+				Pool:                    samplePool,
+				Storage:                 sampleStorage,
+				TemplateID:              &sampleTemplateID,
+				MaxInstances:            &sampleMaxInstances,
+				ProxmoxCloneWaitTimeout: &negativeTimeout,
+			},
+			expectedError: ErrSettingInvalidParameter,
+		},
+		{
+			name: "Valid clone wait timeout",
+			settings: Settings{
+				URL:                     sampleURL,
+				CredentialsFilePath:     sampleCredentialsPath,
+				Pool:                    samplePool,
+				Storage:                 sampleStorage,
+				TemplateID:              &sampleTemplateID,
+				MaxInstances:            &sampleMaxInstances,
+				ProxmoxCloneWaitTimeout: &sampleProxmoxCloneWaitTimeout,
 			},
 			expectedError: nil,
 		},

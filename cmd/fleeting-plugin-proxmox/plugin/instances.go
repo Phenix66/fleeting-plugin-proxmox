@@ -12,7 +12,6 @@ import (
 )
 
 const (
-	proxmoxTaskWaitTimeout   = 5 * time.Minute
 	proxmoxAgentStartTimeout = 2 * time.Minute
 
 	// proxmoxDeployedVMLookupWindow bounds the post-clone lookup retries: the clone task can
@@ -43,7 +42,7 @@ func (ig *InstanceGroup) deployInstance(ctx context.Context, template *proxmox.V
 
 		ig.log.Info("Deploying new instance", "vmid", VMID)
 
-		err = ig.waitTask(ctx, task, proxmoxTaskWaitTimeout)
+		err = ig.waitTask(ctx, task, ig.cloneWaitTimeout())
 	}
 
 	if err != nil {
@@ -122,7 +121,7 @@ func (ig *InstanceGroup) prepareInstance(ctx context.Context, vm *proxmox.Virtua
 	// Start the VM
 	task, err := vm.Start(ctx)
 	if err == nil {
-		err = ig.waitTask(ctx, task, proxmoxTaskWaitTimeout)
+		err = ig.waitTask(ctx, task, ig.taskWaitTimeout())
 	}
 
 	if err != nil {
@@ -161,7 +160,7 @@ func (ig *InstanceGroup) configureHardware(ctx context.Context, vm *proxmox.Virt
 		return fmt.Errorf("config api call failed for vm id '%d': %w", vm.VMID, err)
 	}
 
-	return ig.waitTask(ctx, task, proxmoxTaskWaitTimeout)
+	return ig.waitTask(ctx, task, ig.taskWaitTimeout())
 }
 
 // getDeployedVM fetches the VM a finished clone task produced, retrying while Proxmox's
@@ -423,7 +422,7 @@ func (ig *InstanceGroup) markInstanceForRemoval(ctx context.Context, instance *p
 		}
 
 		if err == nil {
-			err = ig.waitTask(ctx, task, proxmoxTaskWaitTimeout)
+			err = ig.waitTask(ctx, task, ig.taskWaitTimeout())
 		}
 	}
 

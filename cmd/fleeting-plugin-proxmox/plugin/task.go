@@ -53,6 +53,18 @@ func classifyTask(status, exitStatus string) error {
 	return fmt.Errorf("%w: %s", ErrTaskFailed, exitStatus)
 }
 
+// taskWaitTimeout specifies the number of seconds to wait until general Proxmox
+// tasks are considered failed.
+func (ig *InstanceGroup) taskWaitTimeout() time.Duration {
+	return time.Duration(*ig.ProxmoxTaskWaitTimeout) * time.Second
+}
+
+// cloneWaitTimeout specifies the number of seconds to wait until a VM cloning
+// operation is considered failed.
+func (ig *InstanceGroup) cloneWaitTimeout() time.Duration {
+	return time.Duration(*ig.ProxmoxCloneWaitTimeout) * time.Second
+}
+
 // waitTask waits for a Proxmox task to finish and turns a non-OK exit status into an error.
 func (ig *InstanceGroup) waitTask(ctx context.Context, task *proxmox.Task, timeout time.Duration) error {
 	// go-proxmox's NewTask returns nil for an empty UPID, so an operation Proxmox answers with

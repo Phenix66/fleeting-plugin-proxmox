@@ -35,7 +35,9 @@ const (
 	DefaultInstanceNameRunning  = "fleeting-running"
 	DefaultInstanceNameRemoving = "fleeting-removing"
 
+	DefaultProxmoxCloneWaitTimeout int = 900
 	DefaultProxmoxTaskWaitInterval int = 2
+	DefaultProxmoxTaskWaitTimeout  int = 300
 )
 
 // Disk index limits for each disk type.
@@ -118,6 +120,14 @@ type Settings struct {
 
 	// How often should task status be queried
 	ProxmoxTaskWaitInterval *int `json:"proxmox_task_wait_interval"`
+
+	// How long, in seconds, to wait for general Proxmox tasks to finish before the operation that
+	// started it is reported as failed. Covers all tasks except cloning.
+	ProxmoxTaskWaitTimeout *int `json:"proxmox_task_wait_timeout"`
+
+	// How long, in seconds, to wait for a clone task to finish before the deployment is
+	// reported as failed.
+	ProxmoxCloneWaitTimeout *int `json:"proxmox_clone_wait_timeout"`
 }
 
 func (s *Settings) FillWithDefaults() {
@@ -141,6 +151,16 @@ func (s *Settings) FillWithDefaults() {
 		s.ProxmoxTaskWaitInterval = new(int)
 		*s.ProxmoxTaskWaitInterval = DefaultProxmoxTaskWaitInterval
 	}
+
+	if s.ProxmoxTaskWaitTimeout == nil {
+		s.ProxmoxTaskWaitTimeout = new(int)
+		*s.ProxmoxTaskWaitTimeout = DefaultProxmoxTaskWaitTimeout
+	}
+
+	if s.ProxmoxCloneWaitTimeout == nil {
+		s.ProxmoxCloneWaitTimeout = new(int)
+		*s.ProxmoxCloneWaitTimeout = DefaultProxmoxCloneWaitTimeout
+	}
 }
 
 func (s *Settings) CheckRequiredFields() error {
@@ -162,6 +182,8 @@ func (s *Settings) CheckRequiredFields() error {
 		{"instance_cores", s.validateInstanceCores},
 		{"instance_memory", s.validateInstanceMemory},
 		{"proxmox_task_wait_interval", s.validateProxmoxTaskWaitInterval},
+		{"proxmox_task_wait_timeout", s.validateProxmoxTaskWaitTimeout},
+		{"proxmox_clone_wait_timeout", s.validateProxmoxCloneWaitTimeout},
 	}
 
 	for _, v := range validators {
@@ -345,9 +367,7 @@ func (s *Settings) validateInstanceMemory() error {
 	return nil
 }
 
-// validateProxmoxTaskWaitInterval checks that the task wait interval is positive. An unset
-// interval is fine -- FillWithDefaults supplies the default -- but a set one of zero or less
-// would make waitTask poll Proxmox's task API with no pause between polls.
+// validateProxmoxTaskWaitInterval checks that the task wait interval, when set, is positive.
 func (s *Settings) validateProxmoxTaskWaitInterval() error {
 	if s.ProxmoxTaskWaitInterval == nil {
 		return nil
@@ -355,6 +375,32 @@ func (s *Settings) validateProxmoxTaskWaitInterval() error {
 
 	if *s.ProxmoxTaskWaitInterval <= 0 {
 		return fmt.Errorf("%w: proxmox_task_wait_interval: must be greater than zero", ErrSettingInvalidParameter)
+	}
+
+	return nil
+}
+
+// validateProxmoxTaskWaitTimeout checks that the task wait timeout, when set, is positive.
+func (s *Settings) validateProxmoxTaskWaitTimeout() error {
+	if s.ProxmoxTaskWaitTimeout == nil {
+		return nil
+	}
+
+	if *s.ProxmoxTaskWaitTimeout <= 0 {
+		return fmt.Errorf("%w: proxmox_task_wait_timeout: must be greater than zero", ErrSettingInvalidParameter)
+	}
+
+	return nil
+}
+
+// validateProxmoxCloneWaitTimeout checks that the clone wait timeout, when set, is positive.
+func (s *Settings) validateProxmoxCloneWaitTimeout() error {
+	if s.ProxmoxCloneWaitTimeout == nil {
+		return nil
+	}
+
+	if *s.ProxmoxCloneWaitTimeout <= 0 {
+		return fmt.Errorf("%w: proxmox_clone_wait_timeout: must be greater than zero", ErrSettingInvalidParameter)
 	}
 
 	return nil
