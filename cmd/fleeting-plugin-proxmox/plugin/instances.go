@@ -44,8 +44,8 @@ func (ig *InstanceGroup) deployInstance(ctx context.Context, template *proxmox.V
 	VMID, task, err := ig.cloneTemplate(ctx, template)
 	if err == nil {
 		// The deployment owns the VMID from here on: the instance is creating by design until
-		// the rename below, and only the deployment may rename it, so the collector's stale
-		// sweep must not touch it.
+		// the rename below, which is verified before the tracking is released, and only the
+		// deployment may rename it, so the collector's stale sweep must not touch it.
 		defer ig.stopTrackingDeploying(VMID)
 
 		ig.log.Info("Deploying new instance", "vmid", VMID)
@@ -96,7 +96,8 @@ func (ig *InstanceGroup) deployInstance(ctx context.Context, template *proxmox.V
 		newInstanceTags = ig.InstanceTagsRemoving
 	}
 
-	_, renameErr := vm.Config(ctx,
+	renameTask, renameErr := vm.Config(
+		ctx,
 		proxmox.VirtualMachineOption{
 			Name:  vmOptName,
 			Value: newInstanceName,
@@ -106,12 +107,33 @@ func (ig *InstanceGroup) deployInstance(ctx context.Context, template *proxmox.V
 			Value: ig.mergedInstanceTags(baseTags, newInstanceTags),
 		},
 	)
-	if renameErr != nil {
-		ig.log.Error("failed to rename instance", "vmid", VMID, "err", renameErr)
+	if err != nil {
+		// The deployment is already failing: the rename only steers the instance to the
+		// collector, and the orphan sweep is the fallback when it does not land, so it is
+		// not verified here.
+		if renameErr != nil {
+			ig.log.Error("failed to rename instance", "vmid", VMID, "err", renameErr)
+		}
+
+		return VMID, fmt.Errorf("failed to configure instance, marked for removal due to: %w", err)
 	}
 
-	if err != nil {
-		return VMID, fmt.Errorf("failed to configure instance, marked for removal due to: %w", err)
+	// A successful deployment is reported only once the rename to running is observed. Until
+	// it is, the instance carries the creating name, and the moment this function returns it
+	// is no longer tracked -- which is exactly what the collector's stale sweep reads as an
+	// orphan of a failed deployment: an unverified success would have the sweep stop and
+	// delete a healthy, running instance the provisioner was told it owns. The tracking
+	// above covers the wait below, so no sweep round can race the in-flight rename either.
+	// A null answer is a synchronous completion: the handler applied the rename before
+	// responding, which leaves no window at all.
+	if renameErr == nil {
+		renameErr = ig.waitTask(ctx, renameTask, ig.taskWaitTimeout())
+	}
+
+	if renameErr != nil {
+		ig.log.Error("failed to rename instance", "vmid", VMID, "err", renameErr)
+
+		return VMID, fmt.Errorf("failed to rename instance vmid='%d' to %q: %w", VMID, newInstanceName, renameErr)
 	}
 
 	return VMID, nil

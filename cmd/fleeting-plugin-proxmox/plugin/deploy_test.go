@@ -50,6 +50,9 @@ type deployTestOptions struct {
 	// refuses.
 	configFailOnCall *int
 
+	// failTaskType, when non-empty, is the task type the fake's tasks report a failure for.
+	failTaskType string
+
 	configCalls *atomic.Int64
 
 	// resizeNotApplied makes the resize task succeed without the disk growing, the way a
@@ -66,6 +69,11 @@ type deployTestOptions struct {
 	// holdCloneTask, when non-nil, is called synchronously before each qmclone task /status
 	// poll is answered, so a test can hold the clone in flight for a controlled window.
 	holdCloneTask func()
+
+	// holdRenameTask, when non-nil, is called synchronously before each qmconfig task
+	// /status poll is answered, so a test can hold the final rename in flight for a
+	// controlled window.
+	holdRenameTask func()
 }
 
 // deployTestCounts records what a deploy asked the fake to do, so a test can assert on the
@@ -163,8 +171,16 @@ func registerDeployTaskRoute(t *testing.T, mux *http.ServeMux, opts deployTestOp
 			exitStatus = "TASK ERROR: out of disk space"
 		}
 
+		if opts.failTaskType != "" && fields[5] == opts.failTaskType {
+			exitStatus = "TASK ERROR: VM is locked (clone)"
+		}
+
 		if fields[5] == testTaskTypeClone && opts.holdCloneTask != nil {
 			opts.holdCloneTask()
+		}
+
+		if fields[5] == testTaskTypeConfig && opts.holdRenameTask != nil {
+			opts.holdRenameTask()
 		}
 
 		//nolint:gosec//G705 // test-only mock server; the upid is validated above before being written
@@ -259,7 +275,7 @@ func newDeployTestGroup(t *testing.T, log hclog.Logger, opts deployTestOptions) 
 		counts.configs = append(counts.configs, decodeBody(t, request))
 		counts.mu.Unlock()
 
-		fmt.Fprintf(writer, `{"data":%q}`, increaseTestUPID("qmconfig", deployTestCloneVMID))
+		fmt.Fprintf(writer, `{"data":%q}`, increaseTestUPID(testTaskTypeConfig, deployTestCloneVMID))
 	})
 
 	mux.HandleFunc("PUT "+vmRoute("resize"), func(writer http.ResponseWriter, request *http.Request) {
@@ -489,10 +505,11 @@ func TestDeployInstanceCloneWaitsOnConfiguredTimeout(t *testing.T) {
 	close(release)
 }
 
-// A deploy that fully succeeded but whose final rename failed is reported as a success: the
-// instance is up and the failure is logged. It keeps the creating name, so the next Init's
-// stale sweep marks it for removal.
-func TestDeployInstanceSurvivesFinalRenameFailure(t *testing.T) {
+// A deploy that fully succeeded but whose final rename was refused is reported as a failure:
+// without an observed rename to running, the instance would keep the creating name and be
+// indistinguishable from a failed deployment's orphan, which the collector's stale sweep
+// stops and deletes -- while the provisioner was told the instance was created.
+func TestDeployInstanceFailsWhenFinalRenameFails(t *testing.T) {
 	t.Parallel()
 
 	log, logBuf := newLogBuffer(t)
@@ -504,7 +521,8 @@ func TestDeployInstanceSurvivesFinalRenameFailure(t *testing.T) {
 	template := deployTestTemplate(t, ig)
 
 	vmid, err := ig.deployInstance(context.Background(), template)
-	require.NoError(t, err)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "failed to rename instance")
 	require.Equal(t, deployTestCloneVMID, vmid)
 
 	configs := counts.allConfigs()
@@ -513,6 +531,72 @@ func TestDeployInstanceSurvivesFinalRenameFailure(t *testing.T) {
 		vmOptTags: deployTestTagsCreating,
 	}, configs[0])
 	require.Regexp(t, `\[ERROR\].*failed to rename instance`, logBuf.String())
+}
+
+// A deploy that fully succeeded but whose final rename task failed is reported as a failure,
+// for the same reason as a refused rename POST: the rename is accepted by the API but never
+// applied, leaving the instance under the creating name where the collector's stale sweep
+// would stop and delete it.
+func TestDeployInstanceFailsWhenFinalRenameTaskFails(t *testing.T) {
+	t.Parallel()
+
+	log, _ := newLogBuffer(t)
+
+	ig, counts := newDeployTestGroup(t, log, deployTestOptions{failTaskType: testTaskTypeConfig})
+
+	template := deployTestTemplate(t, ig)
+
+	vmid, err := ig.deployInstance(context.Background(), template)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "failed to rename instance")
+	require.Equal(t, deployTestCloneVMID, vmid)
+
+	// Both config writes were accepted; only the rename's task failed.
+	require.Len(t, counts.allConfigs(), 2)
+}
+
+// The VMID stays tracked while its rename task is in flight: until the rename is verified the
+// instance still carries the creating name, and the collector's stale sweep must not mistake
+// it for an orphan of a failed deployment.
+func TestDeployInstanceTracksUntilTheRenameIsVerified(t *testing.T) {
+	t.Parallel()
+
+	log, _ := newLogBuffer(t)
+
+	release := make(chan struct{})
+
+	configCalls := &atomic.Int64{}
+
+	ig, _ := newDeployTestGroup(t, log, deployTestOptions{
+		configCalls:    configCalls,
+		holdRenameTask: func() { <-release },
+	})
+
+	template := deployTestTemplate(t, ig)
+
+	done := make(chan error, 1)
+
+	go func() {
+		_, err := ig.deployInstance(context.Background(), template)
+
+		done <- err
+	}()
+
+	// The config calls are the creating tags, then the final rename: by the time the rename
+	// has been POSTed the deploy waits on its task, which the fake holds.
+	require.Eventually(t, func() bool {
+		return configCalls.Load() >= 2
+	}, 2*time.Second, 10*time.Millisecond, "the final rename was never POSTed")
+
+	require.True(t, ig.isDeploying(deployTestCloneVMID),
+		"the rename is still in flight: the VMID must stay tracked against the stale sweep")
+
+	close(release)
+
+	require.NoError(t, <-done)
+
+	require.False(t, ig.isDeploying(deployTestCloneVMID),
+		"the rename is verified: the VMID must no longer be tracked")
 }
 
 // The clone's VMID must be tracked from the allocation until the deployment returns, whatever
