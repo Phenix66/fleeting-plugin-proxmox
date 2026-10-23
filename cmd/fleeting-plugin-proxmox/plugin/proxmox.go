@@ -9,7 +9,6 @@ import (
 	"net/http"
 	"net/url"
 	"os"
-	"strconv"
 	"strings"
 	"time"
 
@@ -197,69 +196,6 @@ func (ig *InstanceGroup) poolForOwnership(ctx context.Context) (*proxmox.Pool, e
 	ig.poolCacheMu.Unlock()
 
 	return pool, nil
-}
-
-// resolveOwnedInstances lists the pool once and resolves each instance id to the VM it
-// names, the per-instance work running in parallel under the batch cap. Each id's error,
-// if any, is returned in its own slot; an id that resolves carries a non-nil VM in the
-// same slot.
-func (ig *InstanceGroup) resolveOwnedInstances(ctx context.Context, instances []string) ([]*proxmox.VirtualMachine, []error) {
-	if len(instances) == 0 {
-		return nil, nil
-	}
-
-	vms := make([]*proxmox.VirtualMachine, len(instances))
-
-	pool, err := ig.poolForOwnership(ctx)
-	if err != nil {
-		errs := make([]error, len(instances))
-
-		for index, instance := range instances {
-			_, parseErr := strconv.Atoi(instance)
-			if parseErr != nil {
-				errs[index] = fmt.Errorf("invalid vm id '%s': %w", instance, parseErr)
-
-				continue
-			}
-
-			errs[index] = err
-		}
-
-		return nil, errs
-	}
-
-	errs := runParallel(len(instances), func(index int) error {
-		vmid, parseErr := strconv.Atoi(instances[index])
-		if parseErr != nil {
-			return fmt.Errorf("invalid vm id '%s': %w", instances[index], parseErr)
-		}
-
-		member, memberErr := findPoolMemberIn(pool, vmid)
-		if memberErr != nil {
-			return fmt.Errorf("vm id '%d': %w", vmid, memberErr)
-		}
-
-		// An empty listed name is no evidence either way: Proxmox leaves it unset while it
-		// has no fresh status for the VM. The fetched name below decides.
-		if member.Name != "" && !ig.isOwnName(member.Name) {
-			return notOwned(member.VMID, member.Name)
-		}
-
-		vm, fetchErr := ig.getProxmoxVMOnNode(ctx, vmid, member.Node)
-		if fetchErr != nil {
-			return fetchErr
-		}
-
-		if name := fetchedName(vm); !ig.isOwnName(name) {
-			return notOwned(member.VMID, name)
-		}
-
-		vms[index] = vm
-
-		return nil
-	})
-
-	return vms, errs
 }
 
 // ownedInstance resolves a pool member to the VM it names, refusing a VM that does not

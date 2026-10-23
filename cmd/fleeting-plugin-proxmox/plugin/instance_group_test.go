@@ -598,11 +598,11 @@ func TestDecreaseOwnership(t *testing.T) {
 	}
 }
 
-// TestRPCsRefuseForeignInstance verifies that ConnectInfo, Heartbeat, Resume, and Suspend all
-// refuse to act on a VM whose listed or fetched name is not owned by this group, with a message
-// that names the vmid and the foreign name. A VM listed under a foreign name gets no per-vmid
-// API request at all; one listed under our name but fetched under a foreign one gets only the
-// fetch that revealed it.
+// TestRPCsRefuseForeignInstance verifies that ConnectInfo and Heartbeat refuse to act on a
+// VM whose listed or fetched name is not owned by this group, with a message that names the
+// vmid and the foreign name. A VM listed under a foreign name gets no per-vmid API request
+// at all; one listed under our name but fetched under a foreign one gets only the fetch that
+// revealed it.
 func TestRPCsRefuseForeignInstance(t *testing.T) {
 	t.Parallel()
 
@@ -639,34 +639,6 @@ func TestRPCsRefuseForeignInstance(t *testing.T) {
 		require.Empty(t, counts.requestsFor(101))
 	})
 
-	t.Run("Resume refusal", func(t *testing.T) {
-		t.Parallel()
-
-		counts := &removalRequestCounts{}
-		ig := newRemovalTestGroup(t, removalTestServer{members: members, requests: counts})
-
-		succeeded, err := ig.Resume(context.Background(), []string{"100", "101"})
-		require.Equal(t, []string{"100"}, succeeded)
-		require.ErrorIs(t, err, ErrResumeFailed)
-		require.Contains(t, err.Error(), "not owned")
-		require.Empty(t, counts.requestsFor(101))
-		require.True(t, counts.requested(100, "", "status/resume"), "vm 100 should have received a resume request")
-	})
-
-	t.Run("Suspend refusal", func(t *testing.T) {
-		t.Parallel()
-
-		counts := &removalRequestCounts{}
-		ig := newRemovalTestGroup(t, removalTestServer{members: members, requests: counts})
-
-		succeeded, err := ig.Suspend(context.Background(), []string{"100", "101"})
-		require.Equal(t, []string{"100"}, succeeded)
-		require.ErrorIs(t, err, ErrSuspendFailed)
-		require.Contains(t, err.Error(), "not owned")
-		require.Empty(t, counts.requestsFor(101))
-		require.True(t, counts.requested(100, "", "status/suspend"), "vm 100 should have received a suspend request")
-	})
-
 	t.Run("Heartbeat control", func(t *testing.T) {
 		t.Parallel()
 
@@ -701,16 +673,6 @@ func TestRPCsRefuseForeignInstance(t *testing.T) {
 			return err
 		}},
 		{"Heartbeat", func(ig *InstanceGroup) error { return ig.Heartbeat(context.Background(), "102") }},
-		{"Resume", func(ig *InstanceGroup) error {
-			_, err := ig.Resume(context.Background(), []string{"102"})
-
-			return err
-		}},
-		{"Suspend", func(ig *InstanceGroup) error {
-			_, err := ig.Suspend(context.Background(), []string{"102"})
-
-			return err
-		}},
 	}
 
 	for _, testCase := range fetchedForeign {
@@ -724,7 +686,7 @@ func TestRPCsRefuseForeignInstance(t *testing.T) {
 			require.Error(t, err)
 			require.Contains(t, err.Error(), "vmid='102' is named \"other-running\": not owned")
 
-			for _, route := range []string{"agent/", "status/resume", "status/suspend"} {
+			for _, route := range []string{"agent/"} {
 				require.False(t, counts.requested(102, "", route), "acted on vm 102 via %q: %v", route, counts.requestsFor(102))
 			}
 		})
@@ -1356,108 +1318,28 @@ func TestHeartbeatSharesPoolListing(t *testing.T) {
 	})
 }
 
-// Resume and Suspend report each instance's own outcome: a batch in which every attempt
-// failed is an error, one in which something succeeded is not, and an unparseable id fails
-// its own slot without touching the others.
-func TestResumeAndSuspend(t *testing.T) {
+// Suspend and Resume are stubs: the plugin does not advertise the suspend_resume capability,
+// so the provisioner never calls them. If a future provisioner does, both refuse without
+// touching the API at all -- no pool listing, no per-vmid request.
+func TestSuspendResumeUnsupported(t *testing.T) {
 	t.Parallel()
 
-	operations := []struct {
-		name    string
-		call    func(ig *InstanceGroup, instances []string) ([]string, error)
-		wantErr error
-		route   string
-	}{
-		{
-			name: "Resume",
-			call: func(ig *InstanceGroup, instances []string) ([]string, error) {
-				return ig.Resume(context.Background(), instances)
-			},
-			wantErr: ErrResumeFailed,
-			route:   "status/resume",
-		},
-		{
-			name: "Suspend",
-			call: func(ig *InstanceGroup, instances []string) ([]string, error) {
-				return ig.Suspend(context.Background(), instances)
-			},
-			wantErr: ErrSuspendFailed,
-			route:   "status/suspend",
-		},
-	}
+	counts := &removalRequestCounts{}
+	ig := newRemovalTestGroup(t, removalTestServer{
+		members:  []removalTestMember{{vmid: 100, name: DefaultInstanceNameRunning}},
+		requests: counts,
+	})
 
-	for _, operation := range operations {
-		t.Run(operation.name, func(t *testing.T) {
-			t.Parallel()
+	succeeded, err := ig.Resume(context.Background(), []string{"100"})
+	require.Empty(t, succeeded)
+	require.ErrorIs(t, err, ErrSuspendResumeUnsupported)
 
-			t.Run("all instances succeed", func(t *testing.T) {
-				t.Parallel()
+	succeeded, err = ig.Suspend(context.Background(), []string{"100"})
+	require.Empty(t, succeeded)
+	require.ErrorIs(t, err, ErrSuspendResumeUnsupported)
 
-				counts := &removalRequestCounts{}
-				ig := newRemovalTestGroup(t, removalTestServer{
-					members: []removalTestMember{
-						{vmid: 100, name: DefaultInstanceNameRunning},
-						{vmid: 101, name: DefaultInstanceNameRunning},
-					},
-					requests: counts,
-				})
-
-				succeeded, err := operation.call(ig, []string{"100", "101"})
-				require.NoError(t, err)
-				require.Equal(t, []string{"100", "101"}, succeeded)
-				require.True(t, counts.requested(100, "", operation.route))
-				require.True(t, counts.requested(101, "", operation.route))
-			})
-
-			t.Run("unparseable id fails its own slot", func(t *testing.T) {
-				t.Parallel()
-
-				ig := newRemovalTestGroup(t, removalTestServer{
-					members: []removalTestMember{{vmid: 100, name: DefaultInstanceNameRunning}},
-				})
-
-				succeeded, err := operation.call(ig, []string{"100", increaseTestInvalidID})
-				require.ErrorIs(t, err, operation.wantErr)
-				require.Contains(t, err.Error(), "invalid vm id 'not-a-vmid'")
-				require.Equal(t, []string{"100"}, succeeded)
-			})
-
-			t.Run("refused rename target is not attempted", func(t *testing.T) {
-				t.Parallel()
-
-				ig := newRemovalTestGroup(t, removalTestServer{
-					members:   []removalTestMember{{vmid: 100, name: DefaultInstanceNameRunning}},
-					failPaths: []string{operation.route},
-				})
-
-				succeeded, err := operation.call(ig, []string{"100"})
-				require.ErrorIs(t, err, operation.wantErr)
-				require.Contains(t, err.Error(), "api call failed for vm id '100'")
-				require.Empty(t, succeeded)
-			})
-
-			// A batch shares one pool listing: the per-instance work runs over a single
-			// shared listing, so the pool endpoint is paid once, not once per instance.
-			t.Run("batch shares one pool listing", func(t *testing.T) {
-				t.Parallel()
-
-				counts := &removalRequestCounts{}
-				ig := newRemovalTestGroup(t, removalTestServer{
-					members: []removalTestMember{
-						{vmid: 100, name: DefaultInstanceNameRunning},
-						{vmid: 101, name: DefaultInstanceNameRunning},
-						{vmid: 102, name: DefaultInstanceNameRunning},
-					},
-					requests: counts,
-				})
-
-				succeeded, err := operation.call(ig, []string{"100", "101", "102"})
-				require.NoError(t, err)
-				require.Equal(t, []string{"100", "101", "102"}, succeeded)
-				require.Equal(t, 1, counts.poolListings(), "a batch must list the pool once")
-			})
-		})
-	}
+	require.Zero(t, counts.poolListings(), "the stubs must not list the pool")
+	require.Empty(t, counts.requestsFor(100))
 }
 
 // Init validates the settings, builds the client, sweeps the stale instances, and starts the
