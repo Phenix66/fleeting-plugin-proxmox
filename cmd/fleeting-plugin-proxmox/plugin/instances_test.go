@@ -619,6 +619,32 @@ func TestMarkStaleInstancesForRemovalToleratesTaskFailure(t *testing.T) {
 	require.Regexp(t, `\[ERROR\].*continuing startup`, logBuffer.String())
 }
 
+// The sweep classifies by the name on the VM itself when the listing carries none: Proxmox
+// leaves a member's name unset while its status cache holds no fresh entry for the VM, and a
+// stale creating instance under an empty name must be marked, not skipped until a restart
+// that sees the same listing.
+func TestMarkStaleInstancesForRemovalResolvesEmptyNames(t *testing.T) {
+	t.Parallel()
+
+	counts := &removalRequestCounts{}
+
+	ig := newRemovalTestGroup(t, removalTestServer{
+		members: []removalTestMember{
+			{vmid: 100, name: "", fetchedName: DefaultInstanceNameCreating},
+			{vmid: 101, name: "", fetchedName: DefaultInstanceNameRunning},
+		},
+		requests: counts,
+	})
+
+	err := ig.markStaleInstancesForRemoval(context.Background())
+	require.NoError(t, err)
+
+	require.True(t, counts.requested(100, http.MethodPost, "/config"),
+		"the stale creating instance under an empty name was not marked: %v", counts.requestsFor(100))
+	require.False(t, counts.requested(101, http.MethodPost, "/config"),
+		"a running instance was marked: %v", counts.requestsFor(101))
+}
+
 // markInstanceForRemoval must refuse a VM whose fetched name differs from the listed name used
 // to select it. The pool listing and the node fetch are not atomic; between them another
 // manager may have renamed the VM. Acting on the stale listing would rename a VM we do not own.

@@ -420,6 +420,20 @@ func (ig *InstanceGroup) markStaleInstancesForRemoval(ctx context.Context) error
 			continue
 		}
 
+		if member.Name == "" {
+			// An empty listed name is no evidence either way: Proxmox leaves it unset while
+			// its status cache holds no fresh entry for the VM. Ask the VM itself, the way
+			// Update and Decrease do, or a stale creating instance would slip past the sweep
+			// while the node keeps its stale silence.
+			nameErr := ig.nameFromNode(ctx, &member)
+			if nameErr != nil {
+				ig.log.Warn("stale sweep cannot read the name of an instance, skipping it",
+					"vmid", member.VMID, "err", nameErr)
+
+				continue
+			}
+		}
+
 		if member.Name != ig.InstanceNameCreating {
 			continue
 		}

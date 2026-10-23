@@ -182,6 +182,80 @@ func TestCollectRemovedInstancesMarksOrphanedCreatingInstances(t *testing.T) {
 	require.Len(t, ig.instanceCollectionTrigger, 1, "the mark must wake the collector for the round that deletes")
 }
 
+// A listed name that is empty (Proxmox holds no fresh status for the VM) is no evidence
+// either way: the round resolves the name on the VM itself and classifies by it, so a
+// removing instance -- possibly still powered on -- is not skipped until the node reports
+// again, and a stale creating instance is not left for a restart that sees the same listing.
+func TestCollectRemovedInstancesResolvesEmptyNames(t *testing.T) {
+	t.Parallel()
+
+	counts := &removalRequestCounts{}
+
+	ig := newRemovalTestGroup(t, removalTestServer{
+		members: []removalTestMember{
+			// Listed under its name: collected as usual.
+			{vmid: 100, name: DefaultInstanceNameRemoving},
+			// Listed without a name, removing on the VM itself: resolved and collected.
+			{vmid: 104, name: "", fetchedName: DefaultInstanceNameRemoving},
+			// Listed without a name, creating on the VM itself: an orphan, marked for removal.
+			{vmid: 105, name: "", fetchedName: DefaultInstanceNameCreating},
+			// Listed without a name, running on the VM itself: healthy, left alone.
+			{vmid: 106, name: "", fetchedName: DefaultInstanceNameRunning},
+			// Listed without a name, foreign on the VM itself: another manager's, left alone.
+			{vmid: 107, name: "", fetchedName: "other-name"},
+		},
+		requests:       counts,
+		renameSucceeds: true,
+	})
+
+	ig.collectRemovedInstances()
+
+	require.True(t, counts.requested(100, http.MethodPost, "/status/stop"), "the listed removing instance was not stopped: %v", counts.requestsFor(100))
+	require.True(t, counts.requested(104, http.MethodPost, "/status/stop"), "the unnamed removing instance was not stopped: %v", counts.requestsFor(104))
+	require.True(t, counts.requested(104, http.MethodDelete, ""), "the unnamed removing instance was not deleted: %v", counts.requestsFor(104))
+	require.True(t, counts.requested(105, http.MethodPost, "/config"), "the unnamed creating instance was not marked for removal: %v", counts.requestsFor(105))
+
+	// The healthy and the foreign instance get nothing beyond the name resolution itself.
+	require.Equal(t, []string{
+		"GET /nodes/pve-node/qemu/106/status/current",
+		"GET /nodes/pve-node/qemu/106/config",
+	}, counts.requestsFor(106), "a running instance was touched")
+	require.Equal(t, []string{
+		"GET /nodes/pve-node/qemu/107/status/current",
+		"GET /nodes/pve-node/qemu/107/config",
+	}, counts.requestsFor(107), "another manager's instance was touched")
+
+	require.Len(t, ig.instanceCollectionTrigger, 1, "the mark must wake the collector for the round that deletes")
+}
+
+// A member whose name cannot be read (its node is not answering) is skipped for the round:
+// it retries on the next round, and the rest of the round still collects.
+func TestCollectRoundSkipsMemberWhoseNameCannotBeRead(t *testing.T) {
+	t.Parallel()
+
+	log, logBuf := newLogBuffer(t)
+	counts := &removalRequestCounts{}
+
+	ig := newRemovalTestGroup(t, removalTestServer{
+		log: log,
+		members: []removalTestMember{
+			{vmid: 100, name: DefaultInstanceNameRemoving},
+			{vmid: 104, name: ""},
+		},
+		failPaths: []string{"/qemu/104/status/current"},
+		requests:  counts,
+	})
+
+	ig.collectRemovedInstances()
+
+	require.Regexp(t, `\[WARN\].*collector cannot read the name`, logBuf.String())
+	require.Equal(t, []string{
+		"GET /nodes/pve-node/qemu/104/status/current",
+	}, counts.requestsFor(104), "an unreadable member must get no request beyond the failed name read")
+	require.True(t, counts.requested(100, http.MethodDelete, ""), "the round's other member was not collected: %v", counts.requestsFor(100))
+	require.Empty(t, ig.instanceCollectionTrigger, "an unreadable member must not wake the collector")
+}
+
 // A round in which every orphan mark failed renamed nothing, so it must not re-queue a
 // wake-up: the wake costs a trigger wait and a pool listing per attempt, and a persistent
 // failure would otherwise self-refill the collector at the trigger's rate instead of the
