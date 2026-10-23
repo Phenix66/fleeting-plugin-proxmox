@@ -47,7 +47,7 @@ The following image tags are available:
 | `instance_memory`            | int                       | (None - template's value)               | Memory, in MiB, to set on instances after cloning, before they are started. Must be greater than zero. If the template uses ballooning, its minimum memory (`balloon`) must not exceed this value.                                                                                                                                                                                                                                  |
 | `proxmox_task_wait_interval` | int                       | 2                                       | How often, in seconds, to check for Proxmox task completion. Must be greater than zero.                                                                                                                                                                                                                                                                                                                                             |
 | `proxmox_task_wait_timeout`  | int                       | 300                                     | How long, in seconds, to wait for a Proxmox task (start, hardware-config, resize or rename) to finish before the operation that started it is reported as failed. Cloning tasks have their own timeout: `proxmox_clone_wait_timeout`. Must be greater than zero.                                                                                                                                                                    |
-| `proxmox_clone_wait_timeout` | int                       | 900                                     | How long, in seconds, to wait for a clone task to finish before the deployment is reported as failed. A clone task still running at that point is aborted, so no half-cloned VM is left behind; set this longer than your longest expected clone. Must be greater than zero.                                                                                                                                  |
+| `proxmox_clone_wait_timeout` | int                       | 900                                     | How long, in seconds, to wait for a clone task to finish before the deployment is reported as failed. A clone task still running at that point is aborted, so no half-cloned VM is left behind; set this longer than your longest expected clone. Must be greater than zero.                                                                                                                                                        |
 
 ### Credentials file
 
@@ -58,18 +58,24 @@ The credentials file selects the authentication method:
   and there is no ticket to refresh. Create one with
   `pveum user token add <user> --tokenid <token_id>`; the printed secret is `token_secret`.
 - **Ticket (username + password):** set `username` and `password` (with `realm` and
-  optional `otp`). The plugin exchanges them for a session ticket and renews it hourly;
-  after a failed renewal it retries every five minutes until the refresh succeeds. This
+  optional `otp`). The plugin exchanges them for a session ticket and renews it hourly by
+  re-sending the current ticket to Proxmox, which keeps two-factor-protected accounts
+  alive: `otp` authenticates the initial login only and is never re-sent. If the ticket
+  can no longer renew itself (it expired on the server), the plugin re-reads the
+  credentials file and exchanges it again, picking up a rotated password; after a failed
+  renewal it retries every five minutes until the refresh succeeds. A 2FA session can
+  only be renewed while its ticket is still valid on the server; if that is lost, restart
+  the plugin to log in again with a fresh one-time password, or use an API token. This
   remains supported for backwards compatibility.
 
-| Parameter      | Type   | Description                        |
-| -------------- | ------ | ---------------------------------- |
-| `realm`        | string | Authentication realm               |
-| `username`     | string | User name                          |
-| `password`     | string | User password (ticket auth)        |
-| `otp`          | string | One-time password for 2FA (ticket) |
-| `token_id`     | string | API token id (token auth)          |
-| `token_secret` | string | API token secret (token auth)      |
+| Parameter      | Type   | Description                                                 |
+| -------------- | ------ | ----------------------------------------------------------- |
+| `realm`        | string | Authentication realm                                        |
+| `username`     | string | User name                                                   |
+| `password`     | string | User password (ticket auth)                                 |
+| `otp`          | string | One-time password for 2FA; initial login only (ticket auth) |
+| `token_id`     | string | API token id (token auth)                                   |
+| `token_secret` | string | API token secret (token auth)                               |
 
 ### Storage capacity
 
