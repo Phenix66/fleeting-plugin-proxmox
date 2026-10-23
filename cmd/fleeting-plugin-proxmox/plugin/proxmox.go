@@ -336,8 +336,14 @@ func (ig *InstanceGroup) getProxmoxClient() (*proxmox.Client, error) {
 		},
 	}
 
+	// WithRetry wraps the client's transport (installed in finalizeOptions, after
+	// WithHTTPClient, so the order here is irrelevant) to re-issue a request on network
+	// errors and 502/503/504/429, up to three attempts with backoff. Without it, a single
+	// transient API failure mid-operation would abort a long clone poll or a whole deploy;
+	// the client's request timeout above still bounds the exchange including retries.
 	options := []proxmox.Option{
 		proxmox.WithHTTPClient(&httpClient),
+		proxmox.WithRetry(),
 	}
 
 	if credentials.tokenAuth() {
