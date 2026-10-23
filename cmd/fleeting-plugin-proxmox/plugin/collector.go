@@ -96,6 +96,21 @@ func (ig *InstanceGroup) collectRemovedInstances() {
 			continue
 		}
 
+		if member.Name == "" {
+			// An empty listed name is no evidence either way: Proxmox leaves it unset while
+			// its status cache holds no fresh entry for the VM. Ask the VM itself, the way
+			// Update and Decrease do, or the round would skip a removing instance -- possibly
+			// still powered on -- until the node reports again, and a restart would not
+			// change that: the Init sweep sees the same listing.
+			nameErr := ig.nameFromNode(ctx, &member)
+			if nameErr != nil {
+				ig.log.Warn("collector cannot read the name of an instance, skipping it this round",
+					"vmid", member.VMID, "err", nameErr)
+
+				continue
+			}
+		}
+
 		switch member.Name {
 		case ig.InstanceNameRemoving:
 			ig.log.Info("collector found instance to remove", "vmid", member.VMID, "name", member.Name)
