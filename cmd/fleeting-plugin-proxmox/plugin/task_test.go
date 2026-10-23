@@ -18,6 +18,9 @@ import (
 // testTaskTypeClone is the task type the fakes carry in a clone task's UPID.
 const testTaskTypeClone = "qmclone"
 
+// testTaskTypeConfig is the task type the fakes carry in a config (rename) task's UPID.
+const testTaskTypeConfig = "qmconfig"
+
 // testTaskUPID is the UPID of the fake clone task the wait tests poll.
 func testTaskUPID() proxmox.UPID {
 	return testUPID(testTaskTypeClone)

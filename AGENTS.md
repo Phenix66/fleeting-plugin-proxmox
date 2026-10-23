@@ -22,7 +22,7 @@ make unit-test  # Runs the unit testing suite
 
 ## Making Changes
 
-- All code must be linted and unit tested
+- All code must be linted and unit tested using the `make` commands above.
 - All configuration must be documented in `README.md`
 - All commits require DCO sign-off
 - When updating the Go and/or golangci-lint version, ensure to keep the GitHub actions in lock step
