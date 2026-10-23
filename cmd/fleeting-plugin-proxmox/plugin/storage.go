@@ -251,8 +251,8 @@ func (ig *InstanceGroup) warnStorageFull(msg string, args ...any) {
 	ig.log.Debug(msg, args...)
 }
 
-// autoresizeDisk grows the autoresize disk of a freshly cloned instance and checks the result
-// on the VM itself. Neither a successful task nor the absence of one is taken as proof: the
+// autoresizeDisk grows the disk of a freshly cloned instance and checks the result on
+// the VM itself. Neither a successful task nor the absence of one is taken as proof: the
 // instance only counts as resized once its configuration reports the expected size.
 func (ig *InstanceGroup) autoresizeDisk(ctx context.Context, vm *proxmox.VirtualMachine) error {
 	current, err := ig.autoresizeDiskSize(vm)
@@ -265,13 +265,18 @@ func (ig *InstanceGroup) autoresizeDisk(ctx context.Context, vm *proxmox.Virtual
 		return fmt.Errorf("instance_autoresize_size: %w", err)
 	}
 
-	task, err := vm.ResizeDisk(ctx, ig.InstanceAutoresizeDisk, ig.InstanceAutoresizeSize)
-	if err == nil {
-		err = ig.waitTask(ctx, task, ig.taskWaitTimeout())
-	}
+	// Proxmox refuses a resize that does not grow the disk, so when the configured size
+	// does not exceed the current one the disk already meets it: nothing to send, and
+	// the read-back below still proves the size on the VM itself.
+	if expected > current {
+		task, err := vm.ResizeDisk(ctx, ig.InstanceAutoresizeDisk, ig.InstanceAutoresizeSize)
+		if err == nil {
+			err = ig.waitTask(ctx, task, ig.taskWaitTimeout())
+		}
 
-	if err != nil {
-		return err
+		if err != nil {
+			return err
+		}
 	}
 
 	err = vm.Ping(ctx)

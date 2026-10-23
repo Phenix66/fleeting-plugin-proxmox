@@ -46,6 +46,10 @@ type deployTestOptions struct {
 	// at all.
 	autoresize bool
 
+	// autoresizeSize, when non-empty, is the autoresize size the group is configured with
+	// when autoresize is set.
+	autoresizeSize string
+
 	// configFailOnCall, when non-nil, is the zero-based index of the config POST the fake
 	// refuses.
 	configFailOnCall *int
@@ -189,6 +193,77 @@ func registerDeployTaskRoute(t *testing.T, mux *http.ServeMux, opts deployTestOp
 	})
 }
 
+// decodeDeployTestBody decodes a JSON request body, failing the test on a decode error.
+func decodeDeployTestBody(t *testing.T, request *http.Request) map[string]any {
+	t.Helper()
+
+	body := map[string]any{}
+
+	err := json.NewDecoder(request.Body).Decode(&body)
+	if err != nil {
+		t.Errorf("request body: %v", err)
+	}
+
+	return body
+}
+
+// deployTestDisk holds the size of the autoresize disk the fake applies when it handles a
+// resize.
+type deployTestDisk struct {
+	mu   sync.Mutex
+	size string
+}
+
+// registerDeployResizeRoute serves a VM's resize route: it records the resize and refuses
+// one that does not grow the disk, the way a real cluster would fail a deploy on it, and
+// otherwise applies the requested size to the disk unless opts says the resize is not
+// applied.
+func registerDeployResizeRoute(
+	t *testing.T,
+	mux *http.ServeMux,
+	opts deployTestOptions,
+	counts *deployTestCounts,
+	disk *deployTestDisk,
+) {
+	t.Helper()
+
+	mux.HandleFunc("PUT /nodes/"+deployTestNode+"/qemu/{vmid}/resize", func(writer http.ResponseWriter, request *http.Request) {
+		if opts.failStep == deployTestFailStepAutoresize {
+			http.Error(writer, "resize refused", http.StatusInternalServerError)
+
+			return
+		}
+
+		body := decodeDeployTestBody(t, request)
+
+		counts.mu.Lock()
+		counts.resizes = append(counts.resizes, body)
+		counts.mu.Unlock()
+
+		size, _ := body["size"].(string)
+
+		disk.mu.Lock()
+
+		current, err := parseProxmoxSize(disk.size)
+		requested, sizeErr := parseProxmoxSize(size)
+		rejected := err == nil && sizeErr == nil && requested <= current
+
+		if !rejected && !opts.resizeNotApplied {
+			disk.size = size
+		}
+
+		disk.mu.Unlock()
+
+		if rejected {
+			http.Error(writer, "new size has to be larger than the current one", http.StatusInternalServerError)
+
+			return
+		}
+
+		fmt.Fprintf(writer, `{"data":%q}`, increaseTestUPID("qmresize", deployTestCloneVMID))
+	})
+}
+
 // newDeployTestGroup wires an InstanceGroup to an httptest Proxmox serving the whole deploy
 // path -- nextid, clone, task, config, resize, start, agent -- for the template and for the
 // one VM cloned from it, failing the single step named by opts.
@@ -217,19 +292,6 @@ func newDeployTestGroup(t *testing.T, log hclog.Logger, opts deployTestOptions) 
 		return fmt.Sprintf("/nodes/%s/qemu/%d/%s", deployTestNode, deployTestTemplateID, suffix)
 	}
 
-	decodeBody := func(t *testing.T, request *http.Request) map[string]any {
-		t.Helper()
-
-		body := map[string]any{}
-
-		err := json.NewDecoder(request.Body).Decode(&body)
-		if err != nil {
-			t.Errorf("request body: %v", err)
-		}
-
-		return body
-	}
-
 	mux := http.NewServeMux()
 
 	registerDeployPoolRoute(mux, opts, counts, poolBody)
@@ -247,17 +309,14 @@ func newDeployTestGroup(t *testing.T, log hclog.Logger, opts deployTestOptions) 
 
 	// The template and its clone both carry the autoresize disk; the clone's grows when the
 	// fake applies a resize.
-	var (
-		diskSizeMu sync.Mutex
-		diskSize   = deployTestDiskSize
-	)
+	disk := &deployTestDisk{size: deployTestDiskSize}
 
 	mux.HandleFunc("GET "+vmRoute("config"), func(writer http.ResponseWriter, _ *http.Request) {
-		diskSizeMu.Lock()
-		defer diskSizeMu.Unlock()
+		disk.mu.Lock()
+		defer disk.mu.Unlock()
 
 		fmt.Fprintf(writer, `{"data":{"tags":"template-tag","ide2":"none,media=cdrom","%s":"local:vm-%d-disk-0,size=%s"}}`,
-			deployTestAutoresizeDisk, deployTestCloneVMID, diskSize)
+			deployTestAutoresizeDisk, deployTestCloneVMID, disk.size)
 	})
 
 	mux.HandleFunc("GET /nodes/"+deployTestNode+"/storage/"+deployTestStorage+"/status",
@@ -272,33 +331,13 @@ func newDeployTestGroup(t *testing.T, log hclog.Logger, opts deployTestOptions) 
 		}
 
 		counts.mu.Lock()
-		counts.configs = append(counts.configs, decodeBody(t, request))
+		counts.configs = append(counts.configs, decodeDeployTestBody(t, request))
 		counts.mu.Unlock()
 
 		fmt.Fprintf(writer, `{"data":%q}`, increaseTestUPID(testTaskTypeConfig, deployTestCloneVMID))
 	})
 
-	mux.HandleFunc("PUT "+vmRoute("resize"), func(writer http.ResponseWriter, request *http.Request) {
-		if opts.failStep == deployTestFailStepAutoresize {
-			http.Error(writer, "resize refused", http.StatusInternalServerError)
-
-			return
-		}
-
-		body := decodeBody(t, request)
-
-		counts.mu.Lock()
-		counts.resizes = append(counts.resizes, body)
-		counts.mu.Unlock()
-
-		if !opts.resizeNotApplied {
-			diskSizeMu.Lock()
-			diskSize, _ = body["size"].(string)
-			diskSizeMu.Unlock()
-		}
-
-		fmt.Fprintf(writer, `{"data":%q}`, increaseTestUPID("qmresize", deployTestCloneVMID))
-	})
+	registerDeployResizeRoute(t, mux, opts, counts, disk)
 
 	mux.HandleFunc("POST "+templateRoute("clone"), func(writer http.ResponseWriter, _ *http.Request) {
 		if opts.failStep == deployTestFailStepClone {
@@ -354,7 +393,13 @@ func newDeployTestGroup(t *testing.T, log hclog.Logger, opts deployTestOptions) 
 
 	if opts.autoresize {
 		ig.InstanceAutoresizeDisk = deployTestAutoresizeDisk
-		ig.InstanceAutoresizeSize = deployTestAutoresizeSize
+
+		size := deployTestAutoresizeSize
+		if opts.autoresizeSize != "" {
+			size = opts.autoresizeSize
+		}
+
+		ig.InstanceAutoresizeSize = size
 	}
 
 	ig.log = log
@@ -759,6 +804,31 @@ func TestDeployInstanceAutoresizeNotApplied(t *testing.T) {
 	lastConfig, ok := counts.lastConfig()
 	require.True(t, ok, "the failed instance was never renamed")
 	require.Equal(t, DefaultInstanceNameRemoving, lastConfig[vmOptName])
+}
+
+// A configured autoresize size at or below the size the clone already carries must not fail
+// the deploy: Proxmox refuses a resize that does not grow the disk, so the plugin skips the
+// resize and verifies the size on the VM itself.
+func TestDeployInstanceAutoresizeAtOrBelowCurrentSize(t *testing.T) {
+	t.Parallel()
+
+	log, _ := newLogBuffer(t)
+
+	for _, size := range []string{deployTestDiskSize, "512M"} {
+		t.Run(size, func(t *testing.T) {
+			t.Parallel()
+
+			ig, counts := newDeployTestGroup(t, log, deployTestOptions{autoresize: true, autoresizeSize: size})
+
+			template := deployTestTemplate(t, ig)
+
+			vmid, err := ig.deployInstance(context.Background(), template)
+			require.NoError(t, err)
+			require.Equal(t, deployTestCloneVMID, vmid)
+
+			require.Empty(t, counts.allResizes(), "a no-growth resize must not be sent: %v", counts.allResizes())
+		})
+	}
 }
 
 // With storage_reserve set, Increase clones only the instances whose disks fit on the storage
