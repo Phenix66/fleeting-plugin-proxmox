@@ -7,7 +7,6 @@ import (
 	"runtime/debug"
 	"slices"
 	"strconv"
-	"strings"
 	"sync"
 	"time"
 
@@ -20,8 +19,11 @@ var _ provider.InstanceGroup = (*InstanceGroup)(nil)
 
 var (
 	ErrInstanceConnectionTimeout = errors.New("timed out getting connection info")
-	ErrResumeFailed              = errors.New("one or more instances did not resume successfully")
-	ErrSuspendFailed             = errors.New("one or more instances did not suspend successfully")
+
+	// ErrSuspendResumeUnsupported is returned by Suspend and Resume. The plugin does not
+	// advertise the suspend_resume capability, so the provisioner never calls them; the stubs
+	// refuse loudly if a future provisioner does.
+	ErrSuspendResumeUnsupported = errors.New("suspend and resume are not supported")
 
 	// ErrPluginPanic reports a panic in one of the plugin's goroutines -- a parallel instance
 	// operation or a background worker -- recovered so it fails or logs instead of taking the
@@ -511,72 +513,16 @@ func (ig *InstanceGroup) Heartbeat(ctx context.Context, instance string) error {
 	return nil
 }
 
-// Resume implements provider.InstanceGroup. The batch shares one pool listing, and the
-// per-instance work runs in parallel under the batch cap: resume is a fire-and-forget
-// request, so nothing waits on a task.
-func (ig *InstanceGroup) Resume(ctx context.Context, instances []string) ([]string, error) {
-	vms, errs := ig.resolveOwnedInstances(ctx, instances)
-
-	errs = runParallel(len(instances), func(index int) error {
-		if errs[index] != nil {
-			return errs[index]
-		}
-
-		_, err := vms[index].Resume(ctx)
-		if err != nil {
-			return fmt.Errorf("resume api call failed for vm id '%d': %w", vms[index].VMID, err)
-		}
-
-		return nil
-	})
-
-	return suspendResumeOutcome(instances, errs, ErrResumeFailed)
+// Resume implements provider.InstanceGroup. The plugin does not advertise the
+// suspend_resume capability, so the provisioner never calls it; the stub refuses loudly if
+// a future provisioner does.
+func (ig *InstanceGroup) Resume(_ context.Context, instances []string) ([]string, error) {
+	return nil, fmt.Errorf("resume of instances %v: %w", instances, ErrSuspendResumeUnsupported)
 }
 
-// Suspend implements provider.InstanceGroup, with the same shape as Resume.
-func (ig *InstanceGroup) Suspend(ctx context.Context, instances []string) ([]string, error) {
-	vms, errs := ig.resolveOwnedInstances(ctx, instances)
-
-	errs = runParallel(len(instances), func(index int) error {
-		if errs[index] != nil {
-			return errs[index]
-		}
-
-		_, err := vms[index].Pause(ctx)
-		if err != nil {
-			return fmt.Errorf("pause api call failed for vm id '%d': %w", vms[index].VMID, err)
-		}
-
-		return nil
-	})
-
-	return suspendResumeOutcome(instances, errs, ErrSuspendFailed)
-}
-
-// suspendResumeOutcome reports a batch of resume or suspend attempts the way the provisioner
-// expects: the ids whose attempt was accepted, and, when anything failed, an error wrapping
-// the operation's sentinel with every attempt's message.
-func suspendResumeOutcome(instances []string, errs []error, sentinel error) ([]string, error) {
-	var (
-		succeeded []string
-		failed    []string
-	)
-
-	for index, instance := range instances {
-		if errs[index] == nil {
-			succeeded = append(succeeded, instance)
-
-			continue
-		}
-
-		failed = append(failed, errs[index].Error())
-	}
-
-	if len(failed) > 0 {
-		return succeeded, fmt.Errorf("%w: %s", sentinel, strings.Join(failed, ", "))
-	}
-
-	return succeeded, nil
+// Suspend implements provider.InstanceGroup, with the same stub shape as Resume.
+func (ig *InstanceGroup) Suspend(_ context.Context, instances []string) ([]string, error) {
+	return nil, fmt.Errorf("suspend of instances %v: %w", instances, ErrSuspendResumeUnsupported)
 }
 
 // runRecoveringLoop runs a background worker loop for the life of the lifecycle. A panic in
