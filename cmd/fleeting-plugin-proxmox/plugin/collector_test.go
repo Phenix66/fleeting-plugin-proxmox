@@ -161,7 +161,8 @@ func TestCollectRemovedInstancesMarksOrphanedCreatingInstances(t *testing.T) {
 			{vmid: 101, name: DefaultInstanceNameCreating},
 			{vmid: 102, name: DefaultInstanceNameCreating},
 		},
-		requests: counts,
+		requests:       counts,
+		renameSucceeds: true,
 	})
 
 	// vmid 102 is a deployment in flight: creating by design until its deployment renames it.
@@ -179,6 +180,32 @@ func TestCollectRemovedInstancesMarksOrphanedCreatingInstances(t *testing.T) {
 		"the removing instance was not deleted: %v", counts.requestsFor(100))
 
 	require.Len(t, ig.instanceCollectionTrigger, 1, "the mark must wake the collector for the round that deletes")
+}
+
+// A round in which every orphan mark failed renamed nothing, so it must not re-queue a
+// wake-up: the wake costs a trigger wait and a pool listing per attempt, and a persistent
+// failure would otherwise self-refill the collector at the trigger's rate instead of the
+// interval tick's, each cycle also delaying a shutdown. The failed marks retry on the
+// round the tick schedules.
+func TestCollectRemovedInstancesDoesNotWakeWhenEveryMarkFails(t *testing.T) {
+	t.Parallel()
+
+	counts := &removalRequestCounts{}
+
+	ig := newRemovalTestGroup(t, removalTestServer{
+		members: []removalTestMember{
+			{vmid: 101, name: DefaultInstanceNameCreating},
+			{vmid: 102, name: DefaultInstanceNameCreating},
+		},
+		requests: counts,
+	})
+
+	ig.collectRemovedInstances()
+
+	require.True(t, counts.requested(101, http.MethodPost, "/config"), "the orphan was not marked for removal")
+	require.True(t, counts.requested(102, http.MethodPost, "/config"), "the orphan was not marked for removal")
+
+	require.Empty(t, ig.instanceCollectionTrigger, "a round whose marks all failed re-queued a wake-up")
 }
 
 // A collection round can name as many members as the pool holds: its per-instance work must

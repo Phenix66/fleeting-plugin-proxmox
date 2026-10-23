@@ -487,20 +487,32 @@ func (ig *InstanceGroup) markInstanceForRemoval(ctx context.Context, instance *p
 	return nil
 }
 
-// markInstancesForRemoval marks every instance in parallel and wakes the collector once,
-// returning each instance's error in its own slot. An empty batch marks nothing and wakes
-// nothing: the wake costs the collector a trigger wait and a pool listing, and with nothing
-// renamed to removing the round would collect nothing.
+// markInstancesForRemoval marks every instance in parallel, returning each instance's error
+// in its own slot. It wakes the collector only when at least one mark succeeded: a
+// successful rename is work the collector must pick up, while a batch in which every mark
+// failed renamed nothing, so the wake would cost a trigger wait and a pool listing that
+// finds nothing renamed -- and a persistent failure would self-refill the collector at the
+// trigger's rate instead of the interval tick's. The failed marks retry on the round the
+// tick schedules, or when the provisioner retries the failed operation. An empty batch
+// marks nothing and wakes nothing.
 func (ig *InstanceGroup) markInstancesForRemoval(ctx context.Context, instances []*proxmox.ClusterResource) []error {
 	if len(instances) == 0 {
 		return nil
 	}
 
-	defer ig.triggerCollection()
-
-	return runParallel(len(instances), func(index int) error {
+	errs := runParallel(len(instances), func(index int) error {
 		return ig.markInstanceForRemoval(ctx, instances[index])
 	})
+
+	for _, err := range errs {
+		if err == nil {
+			ig.triggerCollection()
+
+			break
+		}
+	}
+
+	return errs
 }
 
 func (ig *InstanceGroup) isProxmoxResourceAnInstance(member proxmox.ClusterResource) bool {

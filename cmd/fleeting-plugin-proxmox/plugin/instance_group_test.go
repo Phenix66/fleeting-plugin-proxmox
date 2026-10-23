@@ -243,8 +243,10 @@ func TestDecreaseWithoutRemovalsDoesNotWakeCollector(t *testing.T) {
 	require.Equal(t, []string{"101"}, succeeded)
 	require.Empty(t, ig.instanceCollectionTrigger, "a Decrease with nothing to remove woke the collector")
 
-	// Control: a target that is still running gets a rename attempted, and an attempted
-	// batch wakes the collector even though the rename's task then fails.
+	// A rename attempt whose task failed renamed nothing, so it does not wake the collector
+	// either: the wake would cost a trigger wait and a pool listing that finds nothing
+	// renamed, and a persistent failure would self-refill the collector at the trigger's
+	// rate. The failed rename retries when the provisioner retries the Decrease.
 	ig = newRemovalTestGroup(t, removalTestServer{
 		members: []removalTestMember{
 			{vmid: 100, name: DefaultInstanceNameRunning},
@@ -254,7 +256,18 @@ func TestDecreaseWithoutRemovalsDoesNotWakeCollector(t *testing.T) {
 	succeeded, err = ig.Decrease(context.Background(), []string{"100"})
 	require.Empty(t, succeeded)
 	require.ErrorIs(t, err, ErrTaskFailed)
-	require.Len(t, ig.instanceCollectionTrigger, 1, "an attempted rename did not wake the collector")
+	require.Empty(t, ig.instanceCollectionTrigger, "a batch whose renames all failed woke the collector")
+
+	// A rename that did happen is work the collector must pick up, so it wakes it.
+	ig = newRemovalTestGroup(t, removalTestServer{
+		members:        []removalTestMember{{vmid: 100, name: DefaultInstanceNameRunning}},
+		renameSucceeds: true,
+	})
+
+	succeeded, err = ig.Decrease(context.Background(), []string{"100"})
+	require.NoError(t, err)
+	require.Equal(t, []string{"100"}, succeeded)
+	require.Len(t, ig.instanceCollectionTrigger, 1, "a successful rename did not wake the collector")
 }
 
 const (
@@ -1365,9 +1378,9 @@ func TestInitLifecycle(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, provider.ProviderInfo{ID: "test-pool", MaxSize: 7}, info)
 
-	// Init's stale sweep leaves a collection wake-up pending; the collector may spend up to
-	// collectionWaitAfterTrigger serving it before it notices the shutdown, so the budget
-	// covers that.
+	// The fake's rename task fails, so Init's stale sweep renames nothing and leaves no
+	// collection wake-up; if a successful sweep ever did, this drain spends it so the
+	// collector cannot be mid-wake-up when the shutdown starts.
 	select {
 	case <-ig.instanceCollectionTrigger:
 	default:

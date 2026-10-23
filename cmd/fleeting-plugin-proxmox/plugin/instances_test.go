@@ -154,6 +154,10 @@ type removalTestServer struct {
 	// stopStatusHold, when non-nil, is called synchronously before each qmstop /status poll
 	// is answered, so a test can hold specific polls for a controlled duration.
 	stopStatusHold func()
+
+	// renameSucceeds makes the rename task report success; by default it fails the way a
+	// VM locked by a clone answers.
+	renameSucceeds bool
 }
 
 // removalTestMember is one VM in the fake's pool. It appears in the pool listing and, under its
@@ -291,8 +295,8 @@ func newLogBuffer(t *testing.T) (hclog.Logger, *bytes.Buffer) {
 }
 
 // removalTestTaskStatus answers a task's /status route by the task type in its UPID: a stop
-// or delete the member flags as failing reports that failure, everything else succeeds, and
-// an unrecognised UPID is answered as the (failing) rename task.
+// or delete the member flags as failing reports that failure, a rename succeeds only when
+// the server flags it, and an unrecognised UPID is answered as the (failing) rename task.
 func removalTestTaskStatus(t *testing.T, opts removalTestServer, memberByVMID map[string]removalTestMember) http.HandlerFunc {
 	t.Helper()
 
@@ -329,6 +333,8 @@ func removalTestTaskStatus(t *testing.T, opts removalTestServer, memberByVMID ma
 			} else {
 				destroyTask(writer, request)
 			}
+		case strings.Contains(request.URL.Path, ":qmconfig:") && opts.renameSucceeds:
+			fmt.Fprint(writer, taskStatusBody("qmconfig", taskStatusStopped, taskExitStatusOK))
 		default:
 			renameTask(writer, request)
 		}
