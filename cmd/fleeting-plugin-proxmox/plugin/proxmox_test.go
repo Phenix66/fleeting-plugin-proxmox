@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -172,6 +173,85 @@ func TestInstanceGroup_getProxmoxClient_authMode(t *testing.T) {
 			case <-time.After(2 * time.Second):
 				t.Fatal("no request reached the server")
 			}
+		})
+	}
+}
+
+// A transient API failure (502/503) must be retried by the transport instead of surfaced:
+// a single blip mid-operation must not abort a long clone poll or a whole deploy. A
+// definitive failure (500) is not retried and must surface to the caller.
+func TestInstanceGroup_getProxmoxClient_retriesTransientErrors(t *testing.T) {
+	t.Parallel()
+
+	for _, testCase := range []struct {
+		name         string
+		statuses     []int // status served per request, the last one repeated
+		wantRequests int64
+		wantErr      bool
+	}{
+		{
+			name:         "503 is retried until clear",
+			statuses:     []int{http.StatusServiceUnavailable, http.StatusServiceUnavailable, http.StatusOK},
+			wantRequests: 3,
+		},
+		{
+			name:         "502 is retried until clear",
+			statuses:     []int{http.StatusBadGateway, http.StatusOK},
+			wantRequests: 2,
+		},
+		{
+			name:         "500 is not retried",
+			statuses:     []int{http.StatusInternalServerError, http.StatusOK},
+			wantRequests: 1,
+			wantErr:      true,
+		},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			t.Parallel()
+
+			var requests atomic.Int64
+
+			server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+				index := int(requests.Add(1)) - 1
+
+				if index >= len(testCase.statuses) {
+					index = len(testCase.statuses) - 1
+				}
+
+				if testCase.statuses[index] != http.StatusOK {
+					writer.WriteHeader(testCase.statuses[index])
+
+					return
+				}
+
+				fmt.Fprint(writer, `{"data":{"version":"8.0","repoid":"test","supportrepo":"test","versiondate":"0"}}`)
+			}))
+			t.Cleanup(server.Close)
+
+			tempDir := t.TempDir()
+			ig := InstanceGroup{
+				URL:                 server.URL,
+				CredentialsFilePath: path.Join(tempDir, "prox_credentials.json"),
+			}
+
+			require.NoError(t, os.WriteFile(
+				ig.CredentialsFilePath,
+				[]byte(`{"realm": "pam","username": "root","token_id": "mytoken","token_secret": "s3cret"}`),
+				0o600,
+			))
+
+			client, err := ig.getProxmoxClient()
+			require.NoError(t, err)
+
+			_, err = client.Version(context.Background())
+
+			if testCase.wantErr {
+				require.Error(t, err)
+			} else {
+				require.NoError(t, err)
+			}
+
+			require.Equal(t, testCase.wantRequests, requests.Load(), "the retry behavior is not as expected")
 		})
 	}
 }
