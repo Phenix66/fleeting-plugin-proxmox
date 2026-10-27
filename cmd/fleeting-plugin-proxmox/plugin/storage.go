@@ -271,7 +271,7 @@ func (ig *InstanceGroup) autoresizeDisk(ctx context.Context, vm *proxmox.Virtual
 	if expected > current {
 		task, err := vm.ResizeDisk(ctx, ig.InstanceAutoresizeDisk, ig.InstanceAutoresizeSize)
 		if err == nil {
-			err = ig.waitTask(ctx, task, ig.taskWaitTimeout())
+			err = ig.waitTask(ctx, uint64(vm.VMID), task, ig.taskWaitTimeout())
 		}
 
 		if err != nil {

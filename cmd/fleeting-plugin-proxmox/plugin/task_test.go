@@ -149,7 +149,7 @@ func TestInstanceGroup_waitTask(t *testing.T) {
 
 	task := proxmox.NewTask(testTaskUPID(), proxmox.NewClient(server.URL))
 
-	err := newWaitTestGroup().waitTask(context.Background(), task, time.Second)
+	err := newWaitTestGroup().waitTask(context.Background(), 100, task, time.Second)
 
 	require.ErrorIs(t, err, ErrTaskFailed)
 	require.Contains(t, err.Error(), "unable to parse volume ID 'local-lvm:'")
@@ -166,7 +166,7 @@ func TestInstanceGroup_waitTaskNilTask(t *testing.T) {
 	group := newWaitTestGroup()
 	group.log = log
 
-	require.NoError(t, group.waitTask(context.Background(), nil, time.Second))
+	require.NoError(t, group.waitTask(context.Background(), 100, nil, time.Second))
 	require.Regexp(t, `\[WARN\].*Proxmox returned no task to wait on`, logBuffer.String())
 }
 
@@ -180,7 +180,7 @@ func TestInstanceGroup_waitTaskTimesOutOnRunningTask(t *testing.T) {
 
 	task := proxmox.NewTask(testTaskUPID(), proxmox.NewClient(server.URL))
 
-	err := newWaitTestGroup().waitTask(context.Background(), task, 100*time.Millisecond)
+	err := newWaitTestGroup().waitTask(context.Background(), 100, task, 100*time.Millisecond)
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "failed while waiting for task")
 }
@@ -205,7 +205,7 @@ func TestInstanceGroup_waitTaskCancellationFiresBetweenPolls(t *testing.T) {
 
 	start := time.Now()
 
-	err := newWaitTestGroup().waitTask(ctx, task, time.Minute)
+	err := newWaitTestGroup().waitTask(ctx, 100, task, time.Minute)
 	elapsed := time.Since(start)
 
 	require.ErrorIs(t, err, context.Canceled)
@@ -225,7 +225,7 @@ func TestInstanceGroup_waitTaskTimeoutFiresBetweenPolls(t *testing.T) {
 
 	start := time.Now()
 
-	err := newWaitTestGroup().waitTask(context.Background(), task, 200*time.Millisecond)
+	err := newWaitTestGroup().waitTask(context.Background(), 100, task, 200*time.Millisecond)
 	elapsed := time.Since(start)
 
 	require.Error(t, err)
@@ -263,7 +263,7 @@ func TestInstanceGroup_waitTaskTimeoutInterruptsBlockedPoll(t *testing.T) {
 	done := make(chan error, 1)
 
 	go func() {
-		done <- newWaitTestGroup().waitTask(context.Background(), task, 200*time.Millisecond)
+		done <- newWaitTestGroup().waitTask(context.Background(), 100, task, 200*time.Millisecond)
 	}()
 
 	var err error
@@ -304,7 +304,7 @@ func TestInstanceGroup_waitTaskCancellationInterruptsBlockedPoll(t *testing.T) {
 	done := make(chan error, 1)
 
 	go func() {
-		done <- newWaitTestGroup().waitTask(ctx, task, time.Minute)
+		done <- newWaitTestGroup().waitTask(ctx, 100, task, time.Minute)
 	}()
 
 	var err error
@@ -335,7 +335,7 @@ func TestInstanceGroup_waitTaskCallerDeadlineIsCancellation(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 150*time.Millisecond)
 	defer cancel()
 
-	err := newWaitTestGroup().waitTask(ctx, task, time.Minute)
+	err := newWaitTestGroup().waitTask(ctx, 100, task, time.Minute)
 
 	require.ErrorIs(t, err, context.DeadlineExceeded)
 	require.Contains(t, err.Error(), "cancelled while waiting for the task")
@@ -360,7 +360,7 @@ func TestInstanceGroup_waitTaskBlankStatusDoesNotFetchLog(t *testing.T) {
 
 	task := proxmox.NewTask(testTaskUPID(), proxmox.NewClient(server.URL))
 
-	err := newWaitTestGroup().waitTask(context.Background(), task, time.Second)
+	err := newWaitTestGroup().waitTask(context.Background(), 100, task, time.Second)
 	require.ErrorIs(t, err, ErrTaskFailed)
 	require.Contains(t, err.Error(), "never observed as stopped")
 	require.False(t, logFetched.Load(), "a task never observed as stopped has no log worth fetching")
@@ -389,7 +389,7 @@ func TestInstanceGroup_waitTaskLogFailureDoesNotMaskTaskFailure(t *testing.T) {
 
 	task := proxmox.NewTask(testTaskUPID(), proxmox.NewClient(server.URL))
 
-	err := group.waitTask(context.Background(), task, time.Second)
+	err := group.waitTask(context.Background(), 100, task, time.Second)
 	require.ErrorIs(t, err, ErrTaskFailed)
 	require.Contains(t, err.Error(), "unable to parse volume ID 'local-lvm:'")
 	require.Contains(t, logBuffer.String(), "logerr", "the failed log fetch must be logged")

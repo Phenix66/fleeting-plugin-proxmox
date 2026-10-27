@@ -113,7 +113,7 @@ func (ig *InstanceGroup) collectRemovedInstances() {
 
 		switch member.Name {
 		case ig.InstanceNameRemoving:
-			ig.log.Info("collector found instance to remove", "vmid", member.VMID, "name", member.Name)
+			ig.log.Info("collector found instance to remove", "vmid", member.VMID, "name", member.Name, "node", member.Node)
 
 			members = append(members, member)
 		case ig.InstanceNameCreating:
@@ -128,7 +128,7 @@ func (ig *InstanceGroup) collectRemovedInstances() {
 				continue
 			}
 
-			ig.log.Info("collector found orphaned creating instance, marking for removal", "vmid", member.VMID, "name", member.Name)
+			ig.log.Info("collector found orphaned creating instance, marking for removal", "vmid", member.VMID, "name", member.Name, "node", member.Node)
 
 			stale = append(stale, &member)
 		}
@@ -252,7 +252,7 @@ func (ig *InstanceGroup) collectInstance(ctx context.Context, member proxmox.Clu
 	if vm.Status == taskStatusRunning {
 		task, err := vm.Stop(ctx)
 		if err == nil {
-			err = ig.waitTask(ctx, task, ig.memberTimeout())
+			err = ig.waitTask(ctx, uint64(vm.VMID), task, ig.memberTimeout())
 		}
 
 		if err != nil {
@@ -271,12 +271,16 @@ func (ig *InstanceGroup) collectInstance(ctx context.Context, member proxmox.Clu
 
 	task, err := vm.Delete(ctx, nil)
 	if err == nil {
-		err = ig.waitTask(ctx, task, ig.memberTimeout())
+		err = ig.waitTask(ctx, uint64(vm.VMID), task, ig.memberTimeout())
 	}
 
 	if err != nil {
 		ig.log.Error("collector failed to delete instance", "vmid", member.VMID, "err", err)
+
+		return
 	}
+
+	ig.log.Info("collector removed instance", "vmid", member.VMID, "node", member.Node)
 }
 
 // fetchToCollect fetches a listed member through getListedVM, logging a failed fetch; false

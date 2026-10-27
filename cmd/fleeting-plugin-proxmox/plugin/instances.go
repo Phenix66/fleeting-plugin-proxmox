@@ -48,9 +48,18 @@ func (ig *InstanceGroup) deployInstance(ctx context.Context, template *proxmox.V
 		// deployment may rename it, so the collector's stale sweep must not touch it.
 		defer ig.stopTrackingDeploying(VMID)
 
-		ig.log.Info("Deploying new instance", "vmid", VMID)
+		// The clone lands on the target node when one is configured, otherwise on the
+		// template's node: name that host in the log so a stuck deployment can be looked up
+		// on the right pve.
+		targetNode := ig.InstanceTargetNode
+		if targetNode == "" {
+			targetNode = template.Node
+		}
 
-		err = ig.waitTask(ctx, task, ig.cloneWaitTimeout())
+		ig.log.Info("Deploying new instance", "vmid", VMID, "template", template.VMID, "node", targetNode)
+
+		//nolint:gosec//G115 // VMID is a Proxmox-allocated VMID, which cannot overflow uint64
+		err = ig.waitTask(ctx, uint64(VMID), task, ig.cloneWaitTimeout())
 		if errors.Is(err, proxmox.ErrTimeout) {
 			// The clone is outliving the configured wait. The task keeps running whether the
 			// deployment follows it or not, so it is settled -- checked once more, and
@@ -127,7 +136,8 @@ func (ig *InstanceGroup) deployInstance(ctx context.Context, template *proxmox.V
 	// A null answer is a synchronous completion: the handler applied the rename before
 	// responding, which leaves no window at all.
 	if renameErr == nil {
-		renameErr = ig.waitTask(ctx, renameTask, ig.taskWaitTimeout())
+		//nolint:gosec//G115 // VMID is a Proxmox-allocated VMID, which cannot overflow uint64
+		renameErr = ig.waitTask(ctx, uint64(VMID), renameTask, ig.taskWaitTimeout())
 	}
 
 	if renameErr != nil {
@@ -157,7 +167,7 @@ func (ig *InstanceGroup) prepareInstance(ctx context.Context, vm *proxmox.Virtua
 	// Start the VM
 	task, err := vm.Start(ctx)
 	if err == nil {
-		err = ig.waitTask(ctx, task, ig.taskWaitTimeout())
+		err = ig.waitTask(ctx, uint64(vm.VMID), task, ig.taskWaitTimeout())
 	}
 
 	if err != nil {
@@ -196,7 +206,7 @@ func (ig *InstanceGroup) configureHardware(ctx context.Context, vm *proxmox.Virt
 		return fmt.Errorf("config api call failed for vm id '%d': %w", vm.VMID, err)
 	}
 
-	return ig.waitTask(ctx, task, ig.taskWaitTimeout())
+	return ig.waitTask(ctx, uint64(vm.VMID), task, ig.taskWaitTimeout())
 }
 
 // getDeployedVM fetches the VM a finished clone task produced, retrying while Proxmox's
@@ -510,14 +520,14 @@ func (ig *InstanceGroup) markInstanceForRemoval(ctx context.Context, instance *p
 		}
 
 		if err == nil {
-			err = ig.waitTask(ctx, task, ig.taskWaitTimeout())
+			err = ig.waitTask(ctx, uint64(vm.VMID), task, ig.taskWaitTimeout())
 		}
 	}
 
 	if err != nil {
 		log.Error("Failed to mark instance for removal", "err", err)
 
-		return fmt.Errorf("failed to mark instance for removal: %w", err)
+		return fmt.Errorf("failed to mark instance vmid='%d' for removal: %w", instance.VMID, err)
 	}
 
 	return nil
