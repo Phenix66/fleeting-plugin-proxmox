@@ -187,6 +187,15 @@ func (ig *InstanceGroup) Init(ctx context.Context, logger hclog.Logger, settings
 		ig.startSessionTicketRefresher()
 	}
 
+	auth := "ticket"
+	if ig.usingTokenAuth {
+		auth = "api-token"
+	}
+
+	// The lifecycle's start marker: the settings it runs with, so a log from this run can be
+	// tied back to its configuration without the config file at hand.
+	ig.log.Info("initialised instance group", "url", ig.URL, "pool", ig.Pool, "template", *ig.TemplateID, "max_instances", *ig.MaxInstances, "auth", auth)
+
 	return provider.ProviderInfo{
 		ID:      ig.Pool,
 		MaxSize: *ig.MaxInstances,
@@ -209,6 +218,10 @@ func (ig *InstanceGroup) Shutdown(ctx context.Context) error {
 	if ig.collectorShutdownTrigger == nil {
 		return nil
 	}
+
+	// The lifecycle's end marker: instances still creating when this fires are the ones the
+	// next Init's stale sweep will mark for removal.
+	ig.log.Info("shutting down instance group", "pool", ig.Pool)
 
 	ig.shutdownOnce.Do(func() {
 		close(ig.collectorShutdownTrigger)
@@ -332,7 +345,14 @@ func (ig *InstanceGroup) Increase(ctx context.Context, count int) (int, error) {
 	errs := runParallel(count, func(_ int) error {
 		vmid, err := ig.deployInstance(ctx, template)
 		if err != nil {
-			ig.log.Error("failed to deploy an instance", "vmid", vmid, "err", err)
+			// The clone can fail before Proxmox allocates a VMID; the negative sentinel is not
+			// a VM, so it is omitted from the log rather than reported as one.
+			args := []any{"template", template.VMID, "err", err}
+			if vmid >= 0 {
+				args = append(args, "vmid", vmid)
+			}
+
+			ig.log.Error("failed to deploy an instance", args...)
 
 			return err
 		}
@@ -390,6 +410,8 @@ func (ig *InstanceGroup) Update(ctx context.Context, update func(instance string
 
 		state, ok := ig.stateForName(member.Name)
 		if !ok {
+			ig.log.Debug("skipping instance with unrecognized name", "vmid", member.VMID, "name", member.Name, "node", member.Node)
+
 			continue // Unknown name, skipping...
 		}
 

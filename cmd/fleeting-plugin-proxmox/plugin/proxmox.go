@@ -167,6 +167,9 @@ func (ig *InstanceGroup) nameFromNode(ctx context.Context, member *proxmox.Clust
 
 	member.Name = fetchedName(vm)
 
+	ig.log.Debug("pool listing carried no name for the instance, read it from the node",
+		"vmid", member.VMID, "node", member.Node, "name", member.Name)
+
 	return nil
 }
 

@@ -80,13 +80,13 @@ func (ig *InstanceGroup) settleTimeout() time.Duration {
 }
 
 // waitTask waits for a Proxmox task to finish and turns a non-OK exit status into an error.
-func (ig *InstanceGroup) waitTask(ctx context.Context, task *proxmox.Task, timeout time.Duration) error {
+func (ig *InstanceGroup) waitTask(ctx context.Context, vmid uint64, task *proxmox.Task, timeout time.Duration) error {
 	// go-proxmox's NewTask returns nil for an empty UPID, so an operation Proxmox answers with
 	// null data yields no task. That may be a synchronous completion, so it is not an error
 	// here -- but it is never silent, and a caller for which "no task" means "not verified"
 	// checks for nil itself before calling this.
 	if task == nil {
-		ig.log.Warn("Proxmox returned no task to wait on, treating the operation as complete")
+		ig.log.Warn("Proxmox returned no task to wait on, treating the operation as complete", "vmid", vmid)
 
 		return nil
 	}
@@ -109,7 +109,7 @@ func (ig *InstanceGroup) waitTask(ctx context.Context, task *proxmox.Task, timeo
 	if task.ExitStatus != "" {
 		logLines, logErr := taskLog(ctx, task)
 
-		ig.log.Error("Proxmox task failed", "upid", task.UPID, "exitstatus", task.ExitStatus, "log", logLines, "logerr", logErr)
+		ig.log.Error("Proxmox task failed", "vmid", vmid, "upid", task.UPID, "exitstatus", task.ExitStatus, "log", logLines, "logerr", logErr)
 	}
 
 	return fmt.Errorf("task '%s': %w", task.UPID, err)

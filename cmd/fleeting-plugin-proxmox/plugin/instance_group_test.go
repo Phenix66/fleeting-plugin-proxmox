@@ -39,6 +39,7 @@ func TestShutdownIsIdempotent(t *testing.T) {
 	t.Parallel()
 
 	ig := &InstanceGroup{
+		log:                                   hclog.NewNullLogger(),
 		collectorShutdownTrigger:              make(chan struct{}),
 		sessionTicketRefresherShutdownTrigger: make(chan struct{}),
 	}
@@ -83,7 +84,7 @@ func TestShutdownWithoutInitDoesNotPanic(t *testing.T) {
 func TestShutdownAfterInitCycleDoesNotHang(t *testing.T) {
 	t.Parallel()
 
-	ig := &InstanceGroup{}
+	ig := &InstanceGroup{log: hclog.NewNullLogger()}
 
 	// A Shutdown before the first Init has nothing to close, and resetLifecycle re-arms the
 	// guard on every Init, so what that first call does with the guard cannot strand a later
@@ -103,7 +104,7 @@ func TestShutdownAfterInitCycleDoesNotHang(t *testing.T) {
 func TestInitWithoutShutdownStopsPreviousWorkers(t *testing.T) {
 	t.Parallel()
 
-	ig := &InstanceGroup{}
+	ig := &InstanceGroup{log: hclog.NewNullLogger()}
 
 	// Cycle one: a collector and a refresher that capture their triggers the way the real
 	// workers' selects do on entry, and report when they exit.
