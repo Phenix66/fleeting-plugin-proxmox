@@ -29,8 +29,13 @@ const (
 	maxCloneAttempts = 5
 )
 
-// ErrNoFreeVMID reports that no VMID outside the quarantine was found within maxVMIDProbes.
-var ErrNoFreeVMID = errors.New("no free VMID outside the reuse quarantine")
+var (
+	// ErrNoFreeVMID reports that no VMID outside the quarantine was found within maxVMIDProbes.
+	ErrNoFreeVMID = errors.New("no free VMID outside the reuse quarantine")
+
+	// ErrVMIDRangeFull reports that every VMID in vmid_range is taken.
+	ErrVMIDRangeFull = errors.New("no free VMID in vmid_range")
+)
 
 // trackFreed records that the collector has deleted vmid, so cloneTemplate keeps it from new
 // clones for freedVMIDQuarantine. Expired entries are dropped on the way.
@@ -53,12 +58,22 @@ func (ig *InstanceGroup) trackFreed(vmid int) {
 
 // isQuarantined reports whether vmid was freed by the collector within freedVMIDQuarantine.
 func (ig *InstanceGroup) isQuarantined(vmid int) bool {
+	_, quarantined := ig.quarantinedAt(vmid)
+
+	return quarantined
+}
+
+// quarantinedAt returns when the collector freed vmid, if it is still quarantined.
+func (ig *InstanceGroup) quarantinedAt(vmid int) (time.Time, bool) {
 	ig.freedMu.Lock()
 	defer ig.freedMu.Unlock()
 
 	freedAt, ok := ig.freed[vmid]
+	if !ok || time.Since(freedAt) >= freedVMIDQuarantine {
+		return time.Time{}, false
+	}
 
-	return ok && time.Since(freedAt) < freedVMIDQuarantine
+	return freedAt, true
 }
 
 // hasQuarantine reports whether any VMID is currently quarantined.
@@ -73,6 +88,79 @@ func (ig *InstanceGroup) hasQuarantine() bool {
 	}
 
 	return false
+}
+
+// allocateVMID returns the VMID the next clone must use, or zero to let the vendor pick
+// Proxmox's next free one. The caller holds the cloning lock.
+func (ig *InstanceGroup) allocateVMID(ctx context.Context) (int, error) {
+	lower, upper, ok := ig.vmidRange()
+	if ok {
+		return ig.allocateVMIDInRange(ctx, lower, upper)
+	}
+
+	return ig.nextUnquarantinedVMID(ctx)
+}
+
+// allocateVMIDInRange returns the lowest free VMID of vmid_range that is not quarantined.
+// Proxmox reserves nothing: whether a VMID is free is only known by asking, and another
+// manager can take one at any time, so every candidate is probed. The pool listing only
+// spares the probes of the VMIDs this group's own instances hold.
+//
+// When every free VMID of the range is quarantined, the one freed the longest ago is reused
+// rather than failing the clone: a range sized close to max_instances would otherwise refuse
+// new instances for the whole quarantine after a burst of removals, and the provisioner has
+// most likely forgotten the oldest one by then.
+func (ig *InstanceGroup) allocateVMIDInRange(ctx context.Context, lower, upper int) (int, error) {
+	pool, err := ig.getProxmoxPool(ctx)
+	if err != nil {
+		return 0, err
+	}
+
+	used := make(map[int]bool, len(pool.Members))
+
+	for _, member := range pool.Members {
+		//nolint:gosec//G115 // member.VMID is a Proxmox VMID, which always fits in an int
+		used[int(member.VMID)] = true
+	}
+
+	fallback := 0
+
+	var fallbackFreedAt time.Time
+
+	for candidate := lower; candidate <= upper; candidate++ {
+		if used[candidate] {
+			continue
+		}
+
+		freedAt, quarantined := ig.quarantinedAt(candidate)
+		if quarantined && fallback != 0 && !freedAt.Before(fallbackFreedAt) {
+			continue
+		}
+
+		free, err := ig.isVMIDFree(ctx, candidate)
+		if err != nil {
+			return 0, err
+		}
+
+		if !free {
+			continue
+		}
+
+		if !quarantined {
+			return candidate, nil
+		}
+
+		fallback, fallbackFreedAt = candidate, freedAt
+	}
+
+	if fallback != 0 {
+		ig.log.Warn("every free VMID in vmid_range was freed recently, reusing the oldest one",
+			"vmid", fallback, "freed_at", fallbackFreedAt, "vmid_range", ig.VMIDRange)
+
+		return fallback, nil
+	}
+
+	return 0, fmt.Errorf("%w %q", ErrVMIDRangeFull, ig.VMIDRange)
 }
 
 // nextUnquarantinedVMID returns the VMID the next clone must use, or zero to let the vendor

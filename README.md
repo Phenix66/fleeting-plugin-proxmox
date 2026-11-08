@@ -48,6 +48,7 @@ The following image tags are available:
 | `proxmox_task_wait_interval` | int                       | 2                                       | How often, in seconds, to check for Proxmox task completion. Must be greater than zero.                                                                                                                                                                                                                                                                                                                                             |
 | `proxmox_task_wait_timeout`  | int                       | 300                                     | How long, in seconds, to wait for a Proxmox task (start, hardware-config, resize or rename) to finish before the operation that started it is reported as failed. Cloning tasks have their own timeout: `proxmox_clone_wait_timeout`. Must be greater than zero.                                                                                                                                                                    |
 | `proxmox_clone_wait_timeout` | int                       | 900                                     | How long, in seconds, to wait for a clone task to finish before the deployment is reported as failed. A clone task still running at that point is aborted, so no half-cloned VM is left behind; set this longer than your longest expected clone. Must be greater than zero.                                                                                                                                                        |
+| `vmid_range`                 | string                    | (None - next free VMID)                 | Inclusive range of VMIDs, as `lower-upper` (e.g. `10000-10200`), that new instances are cloned to, so the instances of a manager can be grouped together. VMIDs are never reserved: each one is checked for being free before use, and VMIDs used by anything else are skipped. Size the range above `max_instances`. See [VM IDs](#vm-ids).                                                                                        |
 
 ### Credentials file
 
@@ -129,10 +130,19 @@ ID to every new clone. To keep a new instance from being mistaken for one the ru
 removed, the plugin does not reuse the VM ID of an instance it deleted for 15 minutes: while
 such an ID is the next free one, new clones take the next free VM ID above it instead.
 
+With `vmid_range` set, new clones take the lowest free VM ID of that range instead of
+Proxmox's next free one, still skipping the recently deleted ones. Proxmox does not reserve
+VM IDs, so each one is checked for being free right before the clone, and a VM ID something
+else uses is skipped. If the only free VM IDs left in the range were all deleted recently, the
+one deleted the longest ago is reused rather than refusing the clone; if none is free, the
+clone fails until an instance is removed. Leave room above `max_instances` in the range for
+the instances being removed.
+
 Proxmox cannot reserve a VM ID: a clone's ID is read as free first and only taken by the clone
 itself, so another client cloning at the same time, such as another runner manager using the
 same cluster, can take it in between. Proxmox then refuses the clone, and the plugin retries it
-with the next free VM ID, up to 5 times.
+with the next free VM ID (of `vmid_range`, when set), up to 5 times. Giving each runner manager
+its own `vmid_range` avoids these collisions altogether.
 
 ### Running multiple managers on one host
 
