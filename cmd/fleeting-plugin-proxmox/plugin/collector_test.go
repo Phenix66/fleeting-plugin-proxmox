@@ -282,6 +282,56 @@ func TestCollectRemovedInstancesDoesNotWakeWhenEveryMarkFails(t *testing.T) {
 	require.Empty(t, ig.instanceCollectionTrigger, "a round whose marks all failed re-queued a wake-up")
 }
 
+// A deployment that has just renamed its instance to running still shows it as creating in the
+// listing for a few seconds. The round must not take it for an orphan: it is left untouched
+// while the rename settles.
+func TestCollectRemovedInstancesSkipsJustRenamedDeployment(t *testing.T) {
+	t.Parallel()
+
+	counts := &removalRequestCounts{}
+
+	ig := newRemovalTestGroup(t, removalTestServer{
+		members: []removalTestMember{
+			{vmid: 101, name: DefaultInstanceNameCreating, fetchedName: DefaultInstanceNameRunning},
+		},
+		requests: counts,
+	})
+
+	ig.trackDeploying(101)
+	ig.trackRenamed(101)
+	ig.stopTrackingDeploying(101)
+
+	ig.collectRemovedInstances()
+
+	require.Empty(t, counts.requestsFor(101),
+		"the collector touched an instance a deployment has just renamed: %v", counts.requestsFor(101))
+}
+
+// The listing can trail a rename it knows nothing about: a creating member the round takes for
+// an orphan turns out to be running by the time it is fetched. That is a stale listing, not a
+// failure: the member is left alone and nothing is logged as an error.
+func TestCollectRemovedInstancesOrphanRenamedSinceListingIsNotAnError(t *testing.T) {
+	t.Parallel()
+
+	log, logBuf := newLogBuffer(t)
+	counts := &removalRequestCounts{}
+
+	ig := newRemovalTestGroup(t, removalTestServer{
+		log: log,
+		members: []removalTestMember{
+			{vmid: 160, name: DefaultInstanceNameCreating, fetchedName: DefaultInstanceNameRunning},
+		},
+		requests: counts,
+	})
+
+	ig.collectRemovedInstances()
+
+	require.False(t, counts.requested(160, http.MethodPost, "/config"),
+		"a member renamed since the listing was renamed again: %v", counts.requestsFor(160))
+	require.NotContains(t, logBuf.String(), "[ERROR]", "a stale listing is not an error")
+	require.Contains(t, logBuf.String(), "collector skipped creating instance renamed since listing")
+}
+
 // A collection round can name as many members as the pool holds: its per-instance work must
 // run under the same batch cap as every other batch, not one goroutine per member.
 func TestCollectRemovedInstancesCapsConcurrency(t *testing.T) {

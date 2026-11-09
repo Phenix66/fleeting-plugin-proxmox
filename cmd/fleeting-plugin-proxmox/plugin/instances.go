@@ -33,6 +33,12 @@ const (
 	// request; a per-group override wins over it (see InstanceGroup.cloneCheckTimeout).
 	defaultCloneCheckTimeout = 30 * time.Second
 
+	// renameSettleWindow is how long the collector keeps treating a deployment's instance as
+	// owned by it after the deployment has renamed it away from creating: the pool listing
+	// takes a member's name from Proxmox's status cache, which trails a rename by several
+	// seconds, and a listing taken in that window still shows the creating name.
+	renameSettleWindow = 1 * time.Minute
+
 	vmOptName   = "name"
 	vmOptTags   = "tags"
 	vmOptDigest = "digest"
@@ -149,6 +155,11 @@ func (ig *InstanceGroup) deployInstance(ctx context.Context, template *proxmox.V
 
 		return VMID, fmt.Errorf("failed to rename instance vmid='%d' to %q: %w", VMID, newInstanceName, renameErr)
 	}
+
+	// The rename is applied, but the pool listing takes the name from Proxmox's status cache,
+	// which trails it by several seconds: keep the collector from reading the instance as an
+	// orphan in the meantime.
+	ig.trackRenamed(VMID)
 
 	return VMID, nil
 }
@@ -380,6 +391,42 @@ func (ig *InstanceGroup) isDeploying(vmid int) bool {
 	return ok
 }
 
+// trackRenamed records that a deployment has just renamed vmid away from creating, so the
+// collector does not take a listing that still trails the rename for an orphan. Entries older
+// than renameSettleWindow are dropped on the way.
+func (ig *InstanceGroup) trackRenamed(vmid int) {
+	ig.deployingMu.Lock()
+	defer ig.deployingMu.Unlock()
+
+	if ig.renamed == nil {
+		ig.renamed = make(map[int]time.Time)
+	}
+
+	for renamedVMID, renamedAt := range ig.renamed {
+		if time.Since(renamedAt) >= renameSettleWindow {
+			delete(ig.renamed, renamedVMID)
+		}
+	}
+
+	ig.renamed[vmid] = time.Now()
+}
+
+// isOwnedByDeployment reports whether a creating pool member belongs to a deployment rather
+// than being an orphan: either a live deployment owns it, or one has renamed it within
+// renameSettleWindow and the listing has not caught up yet.
+func (ig *InstanceGroup) isOwnedByDeployment(vmid int) bool {
+	ig.deployingMu.Lock()
+	defer ig.deployingMu.Unlock()
+
+	if _, ok := ig.deploying[vmid]; ok {
+		return true
+	}
+
+	renamedAt, ok := ig.renamed[vmid]
+
+	return ok && time.Since(renamedAt) < renameSettleWindow
+}
+
 func (ig *InstanceGroup) getTemplateCloneOptions(template *proxmox.VirtualMachine) (*proxmox.VirtualMachineCloneOptions, error) {
 	cloneOptions := &proxmox.VirtualMachineCloneOptions{
 		Name:    ig.InstanceNameCreating,
@@ -562,7 +609,11 @@ func (ig *InstanceGroup) markInstanceForRemoval(ctx context.Context, instance *p
 	}
 
 	if err != nil {
-		log.Error("Failed to mark instance for removal", "err", err)
+		// A refusal is not a failure: getListedVM has already logged that the VM no longer
+		// carries the name it was listed under.
+		if !errors.Is(err, ErrNotOwned) {
+			log.Error("Failed to mark instance for removal", "err", err)
+		}
 
 		return fmt.Errorf("failed to mark instance vmid='%d' for removal: %w", instance.VMID, err)
 	}

@@ -717,6 +717,30 @@ func TestDeployInstanceTracksTheClonedVMID(t *testing.T) {
 	}
 }
 
+// A deployment whose rename succeeded keeps its instance for the settle window, so a collector
+// listing that still trails the rename does not take it for an orphan.
+func TestDeployInstanceKeepsRenamedInstanceForSettleWindow(t *testing.T) {
+	t.Parallel()
+
+	log, _ := newLogBuffer(t)
+
+	ig, _ := newDeployTestGroup(t, log, deployTestOptions{})
+
+	template := deployTestTemplate(t, ig)
+
+	vmid, err := ig.deployInstance(context.Background(), template)
+	require.NoError(t, err)
+
+	require.False(t, ig.isDeploying(vmid), "the deployment is done: the VMID must no longer be tracked")
+	require.True(t, ig.isOwnedByDeployment(vmid), "the just-renamed instance must not be taken for an orphan")
+
+	ig.deployingMu.Lock()
+	ig.renamed[vmid] = time.Now().Add(-renameSettleWindow)
+	ig.deployingMu.Unlock()
+
+	require.False(t, ig.isOwnedByDeployment(vmid), "the settle window must end")
+}
+
 // A deployment that fails and whose rename to removing fails too leaves the instance under
 // the creating name: the collector's stale sweep must pick it up in a later round and mark it
 // for removal, without waiting for a restart.
@@ -740,6 +764,7 @@ func TestCollectorMarksOrphanLeftByFailedDeploy(t *testing.T) {
 	require.Equal(t, deployTestCloneVMID, vmid)
 
 	require.False(t, ig.isDeploying(vmid), "the failed deployment must not keep its VMID tracked")
+	require.False(t, ig.isOwnedByDeployment(vmid), "a deployment whose rename failed left an orphan")
 
 	ig.collectRemovedInstances()
 

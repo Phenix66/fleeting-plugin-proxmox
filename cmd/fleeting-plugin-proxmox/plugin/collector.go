@@ -122,9 +122,10 @@ func (ig *InstanceGroup) collectRemovedInstances() {
 			// removing also failed, keeps the creating name. The stale sweep at Init covers
 			// orphans left by a previous run; this covers the ones this run's deployments
 			// leave. Mark it for removal; the round the mark triggers collects it, and a
-			// failed mark is retried on the next round.
+			// failed mark is retried on the next round. A deployment that has just renamed
+			// its instance still owns it: the listing trails the rename by several seconds.
 			//nolint:gosec//G115 // member.VMID is a Proxmox VMID, which always fits in an int
-			if ig.isDeploying(int(member.VMID)) {
+			if ig.isOwnedByDeployment(int(member.VMID)) {
 				continue
 			}
 
@@ -141,6 +142,17 @@ func (ig *InstanceGroup) collectRemovedInstances() {
 		// Each failure is already logged with its vmid where it happened; the aggregate
 		// says how many of the round's orphans will retry on the next round.
 		errs := ig.markInstancesForRemoval(ctx, stale)
+
+		for index, markErr := range errs {
+			if errors.Is(markErr, ErrNotOwned) {
+				// Renamed since the listing -- typically a deployment that finished just
+				// before it and whose rename the listing had not caught up with -- so it was
+				// no orphan. Nothing to retry.
+				ig.log.Info("collector skipped creating instance renamed since listing", "vmid", stale[index].VMID)
+
+				errs[index] = nil
+			}
+		}
 
 		err := errors.Join(errs...)
 		if err != nil {
