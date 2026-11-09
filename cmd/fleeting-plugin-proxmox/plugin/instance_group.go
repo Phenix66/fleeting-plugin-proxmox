@@ -97,6 +97,10 @@ type InstanceGroup struct {
 	// group without touching shared state.
 	cloneCheckTimeout time.Duration `json:"-"`
 
+	// agentStartTimeout caps how long a deployment waits for the guest agent of the instance
+	// it started; zero means proxmoxAgentStartTimeout. Per-instance for the same test reason.
+	agentStartTimeout time.Duration `json:"-"`
+
 	// deployingMu guards deploying: the VMIDs a live deployInstance is working on, from the
 	// clone's VMID allocation until the deployment renames the instance away from creating.
 	// The collector's stale sweep skips them: a deploying instance is creating by design, and

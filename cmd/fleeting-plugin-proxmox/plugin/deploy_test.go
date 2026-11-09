@@ -70,6 +70,10 @@ type deployTestOptions struct {
 	// they let a test simulate a listing that lags the clone the way Proxmox's pool can.
 	poolBodies []string
 
+	// agentEmptyAnswers is how many agent probes the fake answers with an empty body, the way
+	// Proxmox can while the guest agent socket comes up, before the agent answers.
+	agentEmptyAnswers int
+
 	// holdCloneTask, when non-nil, is called synchronously before each qmclone task /status
 	// poll is answered, so a test can hold the clone in flight for a controlled window.
 	holdCloneTask func()
@@ -363,10 +367,17 @@ func newDeployTestGroup(t *testing.T, log hclog.Logger, opts deployTestOptions) 
 		fmt.Fprintf(writer, `{"data":%q}`, increaseTestUPID("qmstart", deployTestCloneVMID))
 	})
 
+	var agentProbes atomic.Int64
+
 	mux.HandleFunc("GET "+vmRoute("agent/get-osinfo"), func(writer http.ResponseWriter, _ *http.Request) {
 		if opts.failStep == deployTestFailStepAgent {
 			http.Error(writer, "agent unavailable", http.StatusInternalServerError)
 
+			return
+		}
+
+		if agentProbes.Add(1) <= int64(opts.agentEmptyAnswers) {
+			// A 200 with no body at all: the vendor client fails to decode it.
 			return
 		}
 
@@ -382,6 +393,7 @@ func newDeployTestGroup(t *testing.T, log hclog.Logger, opts deployTestOptions) 
 
 	ig := newWaitTestGroup()
 	ig.Pool = deployTestPool
+	ig.agentStartTimeout = 1500 * time.Millisecond
 	ig.Storage = deployTestStorage
 	ig.TemplateID = &templateID
 	ig.InstanceNameCreating = DefaultInstanceNameCreating
@@ -995,4 +1007,47 @@ func TestDeployInstanceSetsCoresAndMemory(t *testing.T) {
 	require.Len(t, configs, 3)
 	require.Equal(t, map[string]any{vmOptCores: float64(cores), vmOptMemory: float64(memory)}, configs[1])
 	require.Equal(t, DefaultInstanceNameRunning, configs[2][vmOptName])
+}
+
+// Proxmox can answer the agent probe of a booting instance with an empty body while the agent
+// socket comes up. The deployment must keep probing until the agent answers instead of failing
+// on the decode error.
+func TestDeployInstanceRetriesTransientAgentAnswers(t *testing.T) {
+	t.Parallel()
+
+	log, _ := newLogBuffer(t)
+
+	ig, counts := newDeployTestGroup(t, log, deployTestOptions{agentEmptyAnswers: 2})
+	ig.agentStartTimeout = 10 * time.Second
+
+	template := deployTestTemplate(t, ig)
+
+	vmid, err := ig.deployInstance(context.Background(), template)
+	require.NoError(t, err, "an empty agent answer must be retried, not fail the deployment")
+	require.Equal(t, deployTestCloneVMID, vmid)
+
+	lastConfig, ok := counts.lastConfig()
+	require.True(t, ok, "the deployed instance was never renamed")
+	require.Equal(t, DefaultInstanceNameRunning, lastConfig[vmOptName])
+}
+
+// The agent wait must end with the deployment's context, not sit out the agent start timeout.
+func TestDeployInstanceAgentWaitStopsOnContextCancellation(t *testing.T) {
+	t.Parallel()
+
+	log, _ := newLogBuffer(t)
+
+	ig, _ := newDeployTestGroup(t, log, deployTestOptions{failStep: deployTestFailStepAgent})
+	ig.agentStartTimeout = time.Minute
+
+	template := deployTestTemplate(t, ig)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+
+	start := time.Now()
+	_, err := ig.deployInstance(ctx, template)
+	require.ErrorIs(t, err, context.DeadlineExceeded)
+	require.Contains(t, err.Error(), "context finished while waiting for the agent")
+	require.Less(t, time.Since(start), 15*time.Second, "the agent wait outlived its context")
 }

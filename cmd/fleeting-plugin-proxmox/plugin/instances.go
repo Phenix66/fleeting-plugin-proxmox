@@ -14,6 +14,10 @@ import (
 const (
 	proxmoxAgentStartTimeout = 2 * time.Minute
 
+	// agentPollInterval is the pause between guest agent probes while a freshly started
+	// instance boots.
+	agentPollInterval = 1 * time.Second
+
 	// proxmoxDeployedVMLookupWindow bounds the post-clone lookup retries: the clone task can
 	// finish before Proxmox's pool or node listings include the new VM.
 	proxmoxDeployedVMLookupWindow = 30 * time.Second
@@ -174,13 +178,46 @@ func (ig *InstanceGroup) prepareInstance(ctx context.Context, vm *proxmox.Virtua
 		return fmt.Errorf("failed to start newly deployed instance: %w", err)
 	}
 
-	// Wait for agent to start
-	err = vm.WaitForAgent(ctx, int(proxmoxAgentStartTimeout/time.Second))
+	err = ig.waitForAgent(ctx, vm)
 	if err != nil {
 		return fmt.Errorf("failed when waiting for qemu agent to start on newly deployed instance: %w", err)
 	}
 
 	return nil
+}
+
+// waitForAgent probes the guest agent of a freshly started instance until it answers, the
+// agent start timeout elapses or ctx ends. Every failed probe is retried: while the guest
+// boots, Proxmox answers the probe with a 500 that the agent is not running, but also with an
+// empty body or a dropped connection as the agent socket comes up, and the vendor's own wait
+// gives up on anything but the first, failing a deployment whose instance was about to be
+// ready. The last probe's error is reported once the timeout elapses.
+func (ig *InstanceGroup) waitForAgent(ctx context.Context, vm *proxmox.VirtualMachine) error {
+	timeout := proxmoxAgentStartTimeout
+	if ig.agentStartTimeout > 0 {
+		timeout = ig.agentStartTimeout
+	}
+
+	deadline := time.Now().Add(timeout)
+
+	for attempt := 1; ; attempt++ {
+		_, err := vm.AgentOsInfo(ctx)
+		if err == nil {
+			return nil
+		}
+
+		if time.Now().Add(agentPollInterval).After(deadline) {
+			return fmt.Errorf("agent did not answer within %s: %w", timeout, err)
+		}
+
+		ig.log.Debug("guest agent not answering yet, retrying", "vmid", vm.VMID, "attempt", attempt, "err", err)
+
+		select {
+		case <-ctx.Done():
+			return fmt.Errorf("context finished while waiting for the agent of instance vmid='%d': %w", vm.VMID, ctx.Err())
+		case <-time.After(agentPollInterval):
+		}
+	}
 }
 
 // configureHardware applies instance_cores and instance_memory to a freshly cloned instance,
