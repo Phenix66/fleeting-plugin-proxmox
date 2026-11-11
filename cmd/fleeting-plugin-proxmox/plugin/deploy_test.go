@@ -78,6 +78,11 @@ type deployTestOptions struct {
 	// /status poll is answered, so a test can hold the final rename in flight for a
 	// controlled window.
 	holdRenameTask func()
+
+	// takenCloneVMIDs is how many clone POSTs the fake refuses the way Proxmox does when
+	// another clone took the VMID in the meantime. The next free VMID it reports moves past
+	// every refused one, as Proxmox's does once the other clone exists.
+	takenCloneVMIDs int
 }
 
 // deployTestCounts records what a deploy asked the fake to do, so a test can assert on the
@@ -208,6 +213,35 @@ func decodeDeployTestBody(t *testing.T, request *http.Request) map[string]any {
 	return body
 }
 
+// writeProxmoxError answers a request the way Proxmox reports an API handler's failure: a
+// 500 whose reason phrase is the error message, which is all the client keeps of it.
+func writeProxmoxError(t *testing.T, writer http.ResponseWriter, message string) {
+	t.Helper()
+
+	hijacker, ok := writer.(http.Hijacker)
+	if !ok {
+		t.Errorf("the fake cannot hijack the connection to set a reason phrase")
+
+		return
+	}
+
+	conn, buffer, err := hijacker.Hijack()
+	if err != nil {
+		t.Errorf("hijack: %v", err)
+
+		return
+	}
+
+	defer conn.Close()
+
+	fmt.Fprintf(buffer, "HTTP/1.1 500 %s\r\nContent-Length: 0\r\nConnection: close\r\n\r\n", message)
+
+	err = buffer.Flush()
+	if err != nil {
+		t.Errorf("write the error answer: %v", err)
+	}
+}
+
 // deployTestDisk holds the size of the autoresize disk the fake applies when it handles a
 // resize.
 type deployTestDisk struct {
@@ -300,7 +334,12 @@ func newDeployTestGroup(t *testing.T, log hclog.Logger, opts deployTestOptions) 
 	mux.HandleFunc("GET /nodes/"+deployTestNode+"/status", constant(`{"data":{}}`))
 
 	mux.HandleFunc("GET /cluster/status", constant(`{"data":[]}`))
-	mux.HandleFunc("GET /cluster/nextid", constant(fmt.Sprintf(`{"data":"%d"}`, deployTestCloneVMID)))
+
+	var clonesRefusedAsTaken atomic.Int64
+
+	mux.HandleFunc("GET /cluster/nextid", func(writer http.ResponseWriter, _ *http.Request) {
+		fmt.Fprintf(writer, `{"data":"%d"}`, deployTestCloneVMID+clonesRefusedAsTaken.Load())
+	})
 
 	mux.HandleFunc("GET "+templateRoute("status/current"),
 		constant(fmt.Sprintf(`{"data":{"vmid":%d,"name":"template","status":"stopped","template":1}}`, deployTestTemplateID)))
@@ -353,6 +392,13 @@ func newDeployTestGroup(t *testing.T, log hclog.Logger, opts deployTestOptions) 
 		counts.clones++
 		counts.cloneNewIDs = append(counts.cloneNewIDs, newID)
 		counts.mu.Unlock()
+
+		if clonesRefusedAsTaken.Load() < int64(opts.takenCloneVMIDs) {
+			clonesRefusedAsTaken.Add(1)
+			writeProxmoxError(t, writer, fmt.Sprintf("unable to create VM %d: config file already exists", int(newID)))
+
+			return
+		}
 
 		fmt.Fprintf(writer, `{"data":%q}`, increaseTestUPID(testTaskTypeClone, deployTestCloneVMID))
 	})

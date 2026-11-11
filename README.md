@@ -129,6 +129,11 @@ ID to every new clone. To keep a new instance from being mistaken for one the ru
 removed, the plugin does not reuse the VM ID of an instance it deleted for 15 minutes: while
 such an ID is the next free one, new clones take the next free VM ID above it instead.
 
+Proxmox cannot reserve a VM ID: a clone's ID is read as free first and only taken by the clone
+itself, so another client cloning at the same time, such as another runner manager using the
+same cluster, can take it in between. Proxmox then refuses the clone, and the plugin retries it
+with the next free VM ID, up to 5 times.
+
 ### Running multiple managers on one host
 
 Give every runner manager its own user, pool, template, and unique `instance_name_creating`,

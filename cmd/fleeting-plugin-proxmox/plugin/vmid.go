@@ -21,6 +21,12 @@ const (
 	// maxVMIDProbes bounds how many VMIDs past the next free one cloneTemplate probes while
 	// skipping quarantined ones.
 	maxVMIDProbes = 1000
+
+	// maxCloneAttempts bounds how many VMIDs cloneTemplate tries when Proxmox refuses a clone
+	// because its VMID was taken in the meantime. Proxmox has no way to reserve a VMID: it is
+	// read as free first and only taken by the clone, so another client cloning at the same
+	// time, such as another runner using the same cluster, can take it in between.
+	maxCloneAttempts = 5
 )
 
 // ErrNoFreeVMID reports that no VMID outside the quarantine was found within maxVMIDProbes.
@@ -129,4 +135,18 @@ func (ig *InstanceGroup) isVMIDFree(ctx context.Context, vmid int) (bool, error)
 	}
 
 	return false, fmt.Errorf("failed to check whether VMID %d is free: %w", vmid, err)
+}
+
+// isVMIDTakenError reports whether err is Proxmox refusing a clone because vmid was taken
+// since it was read as free. The clone handler checks for the new VMID's config file before
+// it starts the clone task and answers "unable to create VM <vmid>: config file already
+// exists".
+func isVMIDTakenError(err error, vmid int) bool {
+	if err == nil {
+		return false
+	}
+
+	message := err.Error()
+
+	return strings.Contains(message, "already exists") && strings.Contains(message, strconv.Itoa(vmid))
 }

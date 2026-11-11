@@ -2,6 +2,7 @@ package plugin
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -114,4 +115,72 @@ func TestNextUnquarantinedVMID(t *testing.T) {
 	vmid, err = ig.nextUnquarantinedVMID(context.Background())
 	require.NoError(t, err)
 	require.Zero(t, vmid, "an expired quarantine must leave the choice to the vendor again")
+}
+
+// Proxmox cannot reserve a VMID, so another client can take the one a clone was about to use.
+// The clone it then refuses must be retried with the next free VMID instead of failing the
+// deployment.
+func TestCloneTemplateRetriesVMIDTakenInTheMeantime(t *testing.T) {
+	t.Parallel()
+
+	log, _ := newLogBuffer(t)
+
+	ig, counts := newDeployTestGroup(t, log, deployTestOptions{takenCloneVMIDs: 2})
+
+	template := deployTestTemplate(t, ig)
+
+	vmid, task, err := ig.cloneTemplate(context.Background(), template)
+	require.NoError(t, err)
+	require.NotNil(t, task)
+	ig.stopTrackingDeploying(vmid)
+
+	require.Equal(t, deployTestCloneVMID+2, vmid)
+
+	counts.mu.Lock()
+	defer counts.mu.Unlock()
+
+	require.Equal(t, []float64{deployTestCloneVMID, deployTestCloneVMID + 1, deployTestCloneVMID + 2}, counts.cloneNewIDs)
+}
+
+// The retry is bounded: a clone refused as taken on every attempt fails.
+func TestCloneTemplateGivesUpAfterMaxCloneAttempts(t *testing.T) {
+	t.Parallel()
+
+	log, _ := newLogBuffer(t)
+
+	ig, counts := newDeployTestGroup(t, log, deployTestOptions{takenCloneVMIDs: maxCloneAttempts})
+
+	template := deployTestTemplate(t, ig)
+
+	_, _, err := ig.cloneTemplate(context.Background(), template)
+	require.ErrorContains(t, err, "config file already exists")
+	require.Equal(t, maxCloneAttempts, counts.cloneCount())
+}
+
+// A clone refused for any other reason is not retried.
+func TestCloneTemplateDoesNotRetryOtherCloneFailures(t *testing.T) {
+	t.Parallel()
+
+	log, _ := newLogBuffer(t)
+
+	ig, _ := newDeployTestGroup(t, log, deployTestOptions{failStep: deployTestFailStepClone})
+
+	template := deployTestTemplate(t, ig)
+
+	_, _, err := ig.cloneTemplate(context.Background(), template)
+	require.ErrorContains(t, err, "failed to clone the template")
+}
+
+var (
+	errTestVMIDTaken   = errors.New("500 unable to create VM 109: config file already exists")
+	errTestCloneFailed = errors.New("500 Internal Server Error")
+)
+
+func TestIsVMIDTakenError(t *testing.T) {
+	t.Parallel()
+
+	require.True(t, isVMIDTakenError(errTestVMIDTaken, 109))
+	require.False(t, isVMIDTakenError(errTestVMIDTaken, 110), "the refusal is about another VMID")
+	require.False(t, isVMIDTakenError(errTestCloneFailed, 109))
+	require.False(t, isVMIDTakenError(nil, 109))
 }
