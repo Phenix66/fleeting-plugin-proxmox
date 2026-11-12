@@ -308,9 +308,32 @@ func (ig *InstanceGroup) cloneTemplate(ctx context.Context, template *proxmox.Vi
 	ig.instanceCloningMu.Lock()
 	defer ig.instanceCloningMu.Unlock()
 
-	VMID, task, err := template.Clone(ctx, cloneOptions)
-	if err != nil {
-		return -1, nil, fmt.Errorf("failed to clone the template: %w", err)
+	var (
+		VMID int
+		task *proxmox.Task
+	)
+
+	for attempt := 1; ; attempt++ {
+		// Pick the VMID under the cloning lock, like the vendor does, so no other clone of
+		// this group can take it in between. Zero leaves the choice to the vendor.
+		cloneOptions.NewID, err = ig.nextUnquarantinedVMID(ctx)
+		if err != nil {
+			return -1, nil, fmt.Errorf("failed to allocate a VMID for the clone: %w", err)
+		}
+
+		VMID, task, err = template.Clone(ctx, cloneOptions)
+		if err == nil {
+			break
+		}
+
+		// Another client can take the VMID between the moment it is read as free and the
+		// clone: Proxmox then refuses the clone, and the next free VMID is tried instead.
+		if !isVMIDTakenError(err, VMID) || attempt >= maxCloneAttempts {
+			return -1, nil, fmt.Errorf("failed to clone the template: %w", err)
+		}
+
+		ig.log.Info("VMID taken by another clone in the meantime, retrying with the next free one",
+			"vmid", VMID, "attempt", attempt, "err", err)
 	}
 
 	// Track the VMID before the cloning lock is released by the defer above: a pool listing
