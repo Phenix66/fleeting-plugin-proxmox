@@ -316,7 +316,7 @@ func (ig *InstanceGroup) cloneTemplate(ctx context.Context, template *proxmox.Vi
 	for attempt := 1; ; attempt++ {
 		// Pick the VMID under the cloning lock, like the vendor does, so no other clone of
 		// this group can take it in between. Zero leaves the choice to the vendor.
-		cloneOptions.NewID, err = ig.nextUnquarantinedVMID(ctx)
+		cloneOptions.NewID, err = ig.allocateVMID(ctx)
 		if err != nil {
 			return -1, nil, fmt.Errorf("failed to allocate a VMID for the clone: %w", err)
 		}

@@ -40,6 +40,14 @@ const (
 	DefaultProxmoxTaskWaitTimeout  int = 300
 )
 
+// Bounds Proxmox puts on a VMID.
+const (
+	minProxmoxVMID = 100
+	maxProxmoxVMID = 999999999
+)
+
+var vmidRangeRE = regexp.MustCompile(`^(\d+)-(\d+)$`)
+
 // Disk index limits for each disk type.
 const (
 	maxIDEIndex    = 3
@@ -128,6 +136,10 @@ type Settings struct {
 	// How long, in seconds, to wait for a clone task to finish before the deployment is
 	// reported as failed.
 	ProxmoxCloneWaitTimeout *int `json:"proxmox_clone_wait_timeout"`
+
+	// Inclusive range of VMIDs, as "lower-upper", new instances are cloned to. If unset,
+	// instances take Proxmox's next free VMID.
+	VMIDRange string `json:"vmid_range"`
 }
 
 func (s *Settings) FillWithDefaults() {
@@ -184,6 +196,7 @@ func (s *Settings) CheckRequiredFields() error {
 		{"proxmox_task_wait_interval", s.validateProxmoxTaskWaitInterval},
 		{"proxmox_task_wait_timeout", s.validateProxmoxTaskWaitTimeout},
 		{"proxmox_clone_wait_timeout", s.validateProxmoxCloneWaitTimeout},
+		{"vmid_range", s.validateVMIDRange},
 	}
 
 	for _, v := range validators {
@@ -401,6 +414,46 @@ func (s *Settings) validateProxmoxCloneWaitTimeout() error {
 
 	if *s.ProxmoxCloneWaitTimeout <= 0 {
 		return fmt.Errorf("%w: proxmox_clone_wait_timeout: must be greater than zero", ErrSettingInvalidParameter)
+	}
+
+	return nil
+}
+
+// vmidRange returns the bounds of vmid_range; false when it is unset or invalid.
+func (s *Settings) vmidRange() (int, int, bool) {
+	matches := vmidRangeRE.FindStringSubmatch(s.VMIDRange)
+	if matches == nil {
+		return 0, 0, false
+	}
+
+	lower, lowerErr := strconv.Atoi(matches[1])
+	upper, upperErr := strconv.Atoi(matches[2])
+
+	if lowerErr != nil || upperErr != nil {
+		return 0, 0, false
+	}
+
+	return lower, upper, true
+}
+
+// validateVMIDRange checks that the VMID range, when set, is "lower-upper" with both bounds
+// valid Proxmox VMIDs and lower not above upper.
+func (s *Settings) validateVMIDRange() error {
+	if s.VMIDRange == "" {
+		return nil
+	}
+
+	lower, upper, ok := s.vmidRange()
+	if !ok {
+		return fmt.Errorf("%w: vmid_range: must be two VMIDs separated by a dash (e.g.: 10000-10200)", ErrSettingInvalidParameter)
+	}
+
+	if lower < minProxmoxVMID || upper > maxProxmoxVMID {
+		return fmt.Errorf("%w: vmid_range: VMIDs must be between %d and %d", ErrSettingInvalidParameter, minProxmoxVMID, maxProxmoxVMID)
+	}
+
+	if lower > upper {
+		return fmt.Errorf("%w: vmid_range: lower bound must not be greater than upper bound", ErrSettingInvalidParameter)
 	}
 
 	return nil

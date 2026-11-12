@@ -711,3 +711,41 @@ func TestValidateInstanceCoresAndMemory(t *testing.T) {
 		})
 	}
 }
+
+func TestValidateVMIDRange(t *testing.T) {
+	t.Parallel()
+
+	testCases := []struct {
+		name    string
+		value   string
+		wantErr bool
+	}{
+		{name: "not set", value: ""},
+		{name: "range", value: "10000-10200"},
+		{name: "single VMID", value: "10000-10000"},
+		{name: "Proxmox bounds", value: "100-999999999"},
+		{name: "no dash", value: "10000", wantErr: true},
+		{name: "spaces", value: "10000 - 10200", wantErr: true},
+		{name: "negative", value: "-10-10200", wantErr: true},
+		{name: "below Proxmox minimum", value: "99-200", wantErr: true},
+		{name: "above Proxmox maximum", value: "100-1000000000", wantErr: true},
+		{name: "reversed", value: "10200-10000", wantErr: true},
+	}
+
+	for _, testCase := range testCases {
+		t.Run(testCase.name, func(t *testing.T) {
+			t.Parallel()
+
+			settings := Settings{VMIDRange: testCase.value}
+
+			err := settings.validateVMIDRange()
+			if testCase.wantErr {
+				require.ErrorIs(t, err, ErrSettingInvalidParameter)
+
+				return
+			}
+
+			require.NoError(t, err)
+		})
+	}
+}
