@@ -18,6 +18,12 @@ const (
 	// once a minute by default, so this leaves it many updates to do so.
 	freedVMIDQuarantine = 15 * time.Minute
 
+	// takenVMIDCacheTTL is how long a VMID probed as occupied by a VM the plugin cannot see is
+	// remembered as occupied, so a burst of clones skips re-probing the same foreign VMIDs. It
+	// expires quickly enough that a foreign VMID freed within it is reconsidered on the next
+	// allocation; see rememberTaken.
+	takenVMIDCacheTTL = 60 * time.Second
+
 	// maxVMIDProbes bounds how many VMIDs cloneTemplate probes for a free one, past the next
 	// free one while skipping quarantined ones, or between vmid_min and vmid_max.
 	maxVMIDProbes = 1000
@@ -90,6 +96,38 @@ func (ig *InstanceGroup) hasQuarantine() bool {
 	return false
 }
 
+// isRecentlyTaken reports whether vmid was probed as occupied by a VM the plugin cannot see
+// within takenVMIDCacheTTL, so allocateVMIDInRange skips re-probing it.
+func (ig *InstanceGroup) isRecentlyTaken(vmid int) bool {
+	ig.takenMu.Lock()
+	defer ig.takenMu.Unlock()
+
+	takenAt, ok := ig.taken[vmid]
+
+	return ok && time.Since(takenAt) < takenVMIDCacheTTL
+}
+
+// rememberTaken records that vmid was probed as occupied by a VM the plugin cannot see, so a
+// burst of clones skips re-probing it for takenVMIDCacheTTL. Only "occupied" is cached, never
+// "free": a free VMID is unreserved and must be re-checked right before every clone. Expired
+// entries are dropped on the way.
+func (ig *InstanceGroup) rememberTaken(vmid int) {
+	ig.takenMu.Lock()
+	defer ig.takenMu.Unlock()
+
+	if ig.taken == nil {
+		ig.taken = make(map[int]time.Time)
+	}
+
+	for takenVMID, takenAt := range ig.taken {
+		if time.Since(takenAt) >= takenVMIDCacheTTL {
+			delete(ig.taken, takenVMID)
+		}
+	}
+
+	ig.taken[vmid] = time.Now()
+}
+
 // allocateVMID returns the VMID the next clone must use, or zero to let the vendor pick
 // Proxmox's next free one. The caller holds the cloning lock.
 func (ig *InstanceGroup) allocateVMID(ctx context.Context) (int, error) {
@@ -125,6 +163,12 @@ func (ig *InstanceGroup) allocateVMIDInRange(ctx context.Context, lower, upper i
 			continue
 		}
 
+		// A VMID probed as occupied by a VM the plugin cannot see is remembered briefly, so a
+		// burst of clones does not pay the round-trip for the same foreign VMIDs again.
+		if ig.isRecentlyTaken(candidate) {
+			continue
+		}
+
 		freedAt, quarantined := ig.quarantinedAt(candidate)
 		if quarantined && fallback != 0 && !freedAt.Before(fallbackFreedAt) {
 			continue
@@ -138,6 +182,8 @@ func (ig *InstanceGroup) allocateVMIDInRange(ctx context.Context, lower, upper i
 		}
 
 		if !free {
+			ig.rememberTaken(candidate)
+
 			continue
 		}
 

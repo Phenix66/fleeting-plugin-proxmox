@@ -284,6 +284,63 @@ func TestAllocateVMIDInRangeBoundsProbes(t *testing.T) {
 	require.Len(t, *probes, maxVMIDProbes)
 }
 
+// countProbes reports how many times vmid was probed in probes.
+func countProbes(probes *[]string, vmid string) int {
+	count := 0
+	for _, probe := range *probes {
+		if probe == vmid {
+			count++
+		}
+	}
+
+	return count
+}
+
+// A VMID probed as occupied by a VM the plugin cannot see is remembered briefly, so a burst of
+// clones skips re-probing the same foreign VMIDs instead of paying the round-trip for each one;
+// a free VMID is never cached and stays re-checked before every clone.
+func TestAllocateVMIDInRangeCachesTakenVMIDs(t *testing.T) {
+	t.Parallel()
+
+	ig, probes := newVMIDRangeTestGroup(t, new(10000), new(10010), nil, []int{10000, 10001})
+
+	vmid, err := ig.allocateVMID(context.Background())
+	require.NoError(t, err)
+	require.Equal(t, 10002, vmid)
+	require.Equal(t, 1, countProbes(probes, "10000"), "the first clone probes each foreign VMID")
+	require.Equal(t, 1, countProbes(probes, "10001"))
+
+	vmid, err = ig.allocateVMID(context.Background())
+	require.NoError(t, err)
+	require.Equal(t, 10002, vmid)
+	require.Equal(t, 1, countProbes(probes, "10000"), "a cached foreign VMID must not be re-probed")
+	require.Equal(t, 1, countProbes(probes, "10001"))
+	require.Equal(t, 2, countProbes(probes, "10002"), "a free VMID is never cached and stays re-checked")
+}
+
+// The taken-VMID memory expires: once takenVMIDCacheTTL has passed, a foreign VMID is probed
+// again, so one freed within the window is reconsidered on the next allocation.
+func TestAllocateVMIDInRangeRetakesExpiredTakenVMIDs(t *testing.T) {
+	t.Parallel()
+
+	ig, probes := newVMIDRangeTestGroup(t, new(10000), new(10010), nil, []int{10000, 10001})
+
+	vmid, err := ig.allocateVMID(context.Background())
+	require.NoError(t, err)
+	require.Equal(t, 10002, vmid)
+
+	ig.takenMu.Lock()
+	ig.taken[10000] = time.Now().Add(-takenVMIDCacheTTL - time.Second)
+	ig.taken[10001] = time.Now().Add(-takenVMIDCacheTTL - time.Second)
+	ig.takenMu.Unlock()
+
+	vmid, err = ig.allocateVMID(context.Background())
+	require.NoError(t, err)
+	require.Equal(t, 10002, vmid)
+	require.Equal(t, 2, countProbes(probes, "10000"), "an expired foreign VMID must be re-probed")
+	require.Equal(t, 2, countProbes(probes, "10001"))
+}
+
 // Proxmox cannot reserve a VMID, so another client can take the one a clone was about to use.
 // The clone it then refuses must be retried with the next free VMID instead of failing the
 // deployment.
