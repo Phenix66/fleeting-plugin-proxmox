@@ -48,6 +48,8 @@ The following image tags are available:
 | `proxmox_task_wait_interval` | int                       | 2                                       | How often, in seconds, to check for Proxmox task completion. Must be greater than zero.                                                                                                                                                                                                                                                                                                                                             |
 | `proxmox_task_wait_timeout`  | int                       | 300                                     | How long, in seconds, to wait for a Proxmox task (start, hardware-config, resize or rename) to finish before the operation that started it is reported as failed. Cloning tasks have their own timeout: `proxmox_clone_wait_timeout`. Must be greater than zero.                                                                                                                                                                    |
 | `proxmox_clone_wait_timeout` | int                       | 900                                     | How long, in seconds, to wait for a clone task to finish before the deployment is reported as failed. A clone task still running at that point is aborted, so no half-cloned VM is left behind; set this longer than your longest expected clone. Must be greater than zero.                                                                                                                                                        |
+| `vmid_min`                   | int                       | 100                                     | Lowest VMID new instances will be assigned. Must be between 100 and 999999999. See [VM IDs](#vm-ids).                                                                                                                                                                                                                                                                                                                               |
+| `vmid_max`                   | int                       | 999999999                               | Highest VMID new instances will be assigned. Must be between 100 and 999999999, and not lower than `vmid_min`. See [VM IDs](#vm-ids).                                                                                                                                                                                                                                                                                               |
 
 ### Credentials file
 
@@ -114,9 +116,11 @@ add required permissions:
    * `PVEPoolUser`,
    * `PVEDatastoreUser`.
 4. Add following role for the user to the network that you will use for deployed VMs:
-    * `PVESDNAdmin`.
+   * `PVESDNAdmin`.
 5. Add following role for the user to the node with the storage, network, template etc.:
-    * `PVEAuditor` without propagation.
+   * `PVEAuditor` without propagation.
+6. (Optional) Add the following role for the user to `/vms`, see [Choosing VM ID settings](#choosing-vm-id-settings):
+   * `PVEAuditor`
 
 If using an API Token with privilege separation enabled, ensure these privileges are set
 as API token permissions. If privilege separation is not enabled on the token, they can
@@ -129,10 +133,44 @@ ID to every new clone. To keep a new instance from being mistaken for one the ru
 removed, the plugin does not reuse the VM ID of an instance it deleted for 15 minutes: while
 such an ID is the next free one, new clones take the next free VM ID above it instead.
 
-Proxmox cannot reserve a VM ID: a clone's ID is read as free first and only taken by the clone
+With `vmid_min` and/or `vmid_max` set, new clones take the lowest free VM ID in the given range
+(the unset one defaulting to 100 or 999,999,999 respectively) instead of Proxmox's next free one,
+still skipping the recently deleted ones. The VM IDs the cluster lists as used are skipped, and
+each other one is checked for being free right before the clone, since the plugin may not see every
+VM. If the only free VM IDs left in the range were all deleted recently, the one deleted the
+longest ago is reused rather than refusing the clone. If none are free, the clone fails until
+an instance is removed. When configuring the minimum and maximum VM IDs, ensure that the total
+number of IDs available within the range exceed the `max_instances` setting. This will provide
+room for new instances to be provisioned while old instances are still active and waiting to
+be collected then removed.
+
+Proxmox cannot reserve a VM ID. A clone's ID is read as free first and only taken by the clone
 itself, so another client cloning at the same time, such as another runner manager using the
 same cluster, can take it in between. Proxmox then refuses the clone, and the plugin retries it
-with the next free VM ID, up to 5 times.
+with the next free VM ID (between `vmid_min` and `vmid_max`, when set), up to 5 times. Giving
+each runner manager its own range of VM IDs avoids these collisions altogether.
+
+#### Choosing VM ID settings
+
+All of these are optional; pick the one that matches the cluster:
+
+* **A single node, or a cluster where the runners' VMs can use any VM ID**: leave `vmid_min`
+  and `vmid_max` unset. Clones take Proxmox's next free VM ID, as Proxmox would give it to any
+  new VM, and the plugin only steps over its own recently deleted ones.
+* **A cluster with several nodes or several runner managers**: give each runner manager its
+  own range, set high enough that no other VM uses it, for example `vmid_min = 100000` and
+  `vmid_max = 100099` for the first one, `vmid_min = 100100` and `vmid_max = 100199` for the
+  next one. The runners' VMs are then easy to tell apart from the other VMs, managers do not
+  compete for the same VM IDs, and the plugin finds a free one on its first check. Size each
+  range larger than `max_instances`.
+* **A range that other VMs also use**, for instance only `vmid_max` set, so the search starts
+  at 100: with the permissions listed in [Proxmox configuration](#proxmox-configuration), the
+  plugin only sees the VMs of its own pool, so it checks every other VM's ID one by one, up to
+  1000 checks per clone, before finding a free one. Each ID it finds occupied is remembered for
+  a minute, so a burst of clones does not duplicate the checks. Adding the `PVEAuditor` role
+  for the user on `/vms` lets it see every VM and skip their IDs without checking at all. That
+  role is read-only, but it lets the plugin's user see every VM of the cluster, so prefer a
+  reserved range when you can.
 
 ### Running multiple managers on one host
 

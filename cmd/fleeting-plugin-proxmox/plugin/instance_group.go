@@ -158,6 +158,14 @@ type InstanceGroup struct {
 	// re-Init: the provisioner that must see the VMID disappear outlives the lifecycle.
 	freedMu sync.Mutex        `json:"-"`
 	freed   map[int]time.Time `json:"-"`
+
+	// takenMu guards taken: when allocateVMIDInRange probed each VMID and found it occupied by
+	// a VM the plugin cannot see (no audit on /vms), so a burst of clones skips re-probing it
+	// for takenVMIDCacheTTL instead of paying the round-trip again; see rememberTaken. Only
+	// "occupied" is cached, never "free": a free VMID is unreserved and must be re-checked
+	// right before every clone.
+	takenMu sync.Mutex        `json:"-"`
+	taken   map[int]time.Time `json:"-"`
 }
 
 // Init implements provider.InstanceGroup.

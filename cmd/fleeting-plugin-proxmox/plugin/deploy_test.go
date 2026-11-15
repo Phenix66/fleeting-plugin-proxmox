@@ -339,6 +339,8 @@ func newDeployTestGroup(t *testing.T, log hclog.Logger, opts deployTestOptions) 
 
 	mux.HandleFunc("GET /cluster/status", constant(`{"data":[]}`))
 
+	mux.HandleFunc("GET /cluster/resources", constant(`{"data":[]}`))
+
 	var clonesRefusedAsTaken atomic.Int64
 
 	mux.HandleFunc("GET /cluster/nextid", func(writer http.ResponseWriter, _ *http.Request) {

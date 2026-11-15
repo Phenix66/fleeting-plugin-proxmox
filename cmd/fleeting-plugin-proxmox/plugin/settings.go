@@ -40,6 +40,12 @@ const (
 	DefaultProxmoxTaskWaitTimeout  int = 300
 )
 
+// Bounds Proxmox puts on a VMID, and the defaults of vmid_min and vmid_max.
+const (
+	minProxmoxVMID = 100
+	maxProxmoxVMID = 999999999
+)
+
 // Disk index limits for each disk type.
 const (
 	maxIDEIndex    = 3
@@ -128,6 +134,12 @@ type Settings struct {
 	// How long, in seconds, to wait for a clone task to finish before the deployment is
 	// reported as failed.
 	ProxmoxCloneWaitTimeout *int `json:"proxmox_clone_wait_timeout"`
+
+	// Lowest and highest VMID new instances are cloned to. Setting either one restricts
+	// clones to that range, the other one defaulting to Proxmox's bound. If neither is set,
+	// instances take Proxmox's next free VMID.
+	VMIDMin *int `json:"vmid_min"`
+	VMIDMax *int `json:"vmid_max"`
 }
 
 func (s *Settings) FillWithDefaults() {
@@ -184,6 +196,9 @@ func (s *Settings) CheckRequiredFields() error {
 		{"proxmox_task_wait_interval", s.validateProxmoxTaskWaitInterval},
 		{"proxmox_task_wait_timeout", s.validateProxmoxTaskWaitTimeout},
 		{"proxmox_clone_wait_timeout", s.validateProxmoxCloneWaitTimeout},
+		{"vmid_min", s.validateVMIDMin},
+		{"vmid_max", s.validateVMIDMax},
+		{"vmid_min/vmid_max", s.validateVMIDBounds},
 	}
 
 	for _, v := range validators {
@@ -401,6 +416,60 @@ func (s *Settings) validateProxmoxCloneWaitTimeout() error {
 
 	if *s.ProxmoxCloneWaitTimeout <= 0 {
 		return fmt.Errorf("%w: proxmox_clone_wait_timeout: must be greater than zero", ErrSettingInvalidParameter)
+	}
+
+	return nil
+}
+
+// vmidBounds returns the VMIDs new instances are restricted to: vmid_min and vmid_max, each
+// defaulting to Proxmox's bound. False when neither is set, which leaves the choice of the
+// VMID to Proxmox.
+func (s *Settings) vmidBounds() (int, int, bool) {
+	if s.VMIDMin == nil && s.VMIDMax == nil {
+		return 0, 0, false
+	}
+
+	lower, upper := minProxmoxVMID, maxProxmoxVMID
+
+	if s.VMIDMin != nil {
+		lower = *s.VMIDMin
+	}
+
+	if s.VMIDMax != nil {
+		upper = *s.VMIDMax
+	}
+
+	return lower, upper, true
+}
+
+// validateVMIDMin checks that vmid_min, when set, is a valid Proxmox VMID.
+func (s *Settings) validateVMIDMin() error {
+	return validateVMIDSetting("vmid_min", s.VMIDMin)
+}
+
+// validateVMIDMax checks that vmid_max, when set, is a valid Proxmox VMID.
+func (s *Settings) validateVMIDMax() error {
+	return validateVMIDSetting("vmid_max", s.VMIDMax)
+}
+
+func validateVMIDSetting(name string, vmid *int) error {
+	if vmid == nil {
+		return nil
+	}
+
+	if *vmid < minProxmoxVMID || *vmid > maxProxmoxVMID {
+		return fmt.Errorf("%w: %s: must be between %d and %d", ErrSettingInvalidParameter, name, minProxmoxVMID, maxProxmoxVMID)
+	}
+
+	return nil
+}
+
+// validateVMIDBounds checks that vmid_min is not above vmid_max, either one defaulting to
+// Proxmox's bound.
+func (s *Settings) validateVMIDBounds() error {
+	lower, upper, ok := s.vmidBounds()
+	if ok && lower > upper {
+		return fmt.Errorf("%w: vmid_min (%d) must not be greater than vmid_max (%d)", ErrSettingInvalidParameter, lower, upper)
 	}
 
 	return nil

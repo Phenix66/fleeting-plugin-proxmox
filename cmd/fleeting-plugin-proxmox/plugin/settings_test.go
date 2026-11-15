@@ -711,3 +711,61 @@ func TestValidateInstanceCoresAndMemory(t *testing.T) {
 		})
 	}
 }
+
+func TestValidateVMIDBounds(t *testing.T) {
+	t.Parallel()
+
+	testCases := []struct {
+		name    string
+		min     *int
+		max     *int
+		wantErr bool
+	}{
+		{name: "not set"},
+		{name: "both", min: new(10000), max: new(10200)},
+		{name: "single VMID", min: new(10000), max: new(10000)},
+		{name: "Proxmox bounds", min: new(minProxmoxVMID), max: new(maxProxmoxVMID)},
+		{name: "min only", min: new(10000)},
+		{name: "max only", max: new(10200)},
+		{name: "min below Proxmox minimum", min: new(99), wantErr: true},
+		{name: "max below Proxmox minimum", max: new(99), wantErr: true},
+		{name: "max above Proxmox maximum", max: new(maxProxmoxVMID + 1), wantErr: true},
+		{name: "reversed", min: new(10200), max: new(10000), wantErr: true},
+	}
+
+	for _, testCase := range testCases {
+		t.Run(testCase.name, func(t *testing.T) {
+			t.Parallel()
+
+			settings := Settings{VMIDMin: testCase.min, VMIDMax: testCase.max}
+
+			err := errors.Join(settings.validateVMIDMin(), settings.validateVMIDMax(), settings.validateVMIDBounds())
+			if testCase.wantErr {
+				require.ErrorIs(t, err, ErrSettingInvalidParameter)
+
+				return
+			}
+
+			require.NoError(t, err)
+		})
+	}
+}
+
+// Setting only one bound restricts clones all the same, the other one defaulting to
+// Proxmox's bound; setting neither leaves the VMID to Proxmox.
+func TestVMIDBoundsDefaults(t *testing.T) {
+	t.Parallel()
+
+	lower, upper := 10000, 10200
+
+	_, _, restricted := (&Settings{}).vmidBounds()
+	require.False(t, restricted)
+
+	gotLower, gotUpper, restricted := (&Settings{VMIDMin: &lower}).vmidBounds()
+	require.True(t, restricted)
+	require.Equal(t, []int{lower, maxProxmoxVMID}, []int{gotLower, gotUpper})
+
+	gotLower, gotUpper, restricted = (&Settings{VMIDMax: &upper}).vmidBounds()
+	require.True(t, restricted)
+	require.Equal(t, []int{minProxmoxVMID, upper}, []int{gotLower, gotUpper})
+}
